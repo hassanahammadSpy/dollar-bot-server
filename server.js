@@ -1,4 +1,4 @@
-// server.js - Final Fixed Version
+// server.js - Final Fixed Version (With Better Link Parsing)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -16,47 +16,59 @@ const ADMIN_ID = process.env.ADMIN_ID;
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
     try {
-        const serviceAccount = JSON.parse(process.env.FIREBASE_KEY);
+        // ফায়ারবেস কি যদি স্ট্রিং হয়, পার্স করবে
+        const serviceAccount = typeof process.env.FIREBASE_KEY === 'string' 
+            ? JSON.parse(process.env.FIREBASE_KEY) 
+            : process.env.FIREBASE_KEY;
+            
         admin.initializeApp({
             credential: admin.credential.cert(serviceAccount)
         });
-        console.log("Firebase Admin Initialized");
+        console.log("✅ Firebase Admin Initialized");
     } catch (e) {
-        console.error("Firebase Key Error:", e.message);
+        console.error("❌ Firebase Key Error:", e.message);
     }
 } else {
-    console.warn("Warning: FIREBASE_KEY not found.");
+    console.warn("⚠️ Warning: FIREBASE_KEY not found.");
 }
 const db = admin.firestore();
 
-// 1. চ্যানেল টাস্ক ভেরিফিকেশন (FIXED)
+// 1. চ্যানেল টাস্ক ভেরিফিকেশন (IMPROVED LOGIC)
 app.post('/api/verify-channel-task', async (req, res) => {
     const { userId, taskId } = req.body;
+    console.log(`Checking Task: ${taskId} for User: ${userId}`);
 
     try {
-        // ১. ডাটাবেস থেকে টাস্কের লিংক আনা
         const taskRef = db.collection('tasks').doc(taskId);
         const taskSnap = await taskRef.get();
 
         if (!taskSnap.exists) {
-            return res.json({ success: false, message: "Task expired or removed" });
+            return res.status(404).json({ success: false, message: "Task not found" });
         }
 
         const taskData = taskSnap.data();
-        let link = taskData.link;
-
-        // লিংক থেকে ইউজারনেম বের করা (ex: https://t.me/mychannel -> @mychannel)
+        let link = taskData.link.trim(); // লিংক থেকে স্পেস সরাবে
         let channelUsername = "";
+
+        // লিংক থেকে ইউজারনেম বের করার লজিক
         if (link.includes("t.me/")) {
-            channelUsername = "@" + link.split("t.me/")[1].replace("/", "");
+            // https://t.me/username -> username
+            channelUsername = link.split("t.me/")[1].split("/")[0].split("?")[0];
         } else if (link.startsWith("@")) {
-            channelUsername = link;
+            // @username -> username
+            channelUsername = link.replace("@", "");
         } else {
-            // যদি লিংক সঠিক না হয়, তবুও ম্যানুয়ালি সাকসেস দেওয়া (সেফটি)
-            return res.json({ success: true });
+            channelUsername = link; // শুধু username দেওয়া থাকলে
         }
-        
-        // ২. টেলিগ্রাম API দিয়ে মেম্বারশিপ চেক
+
+        // সামনে @ যুক্ত করা (Telegram API এর জন্য)
+        if (!channelUsername.startsWith("@")) {
+            channelUsername = "@" + channelUsername;
+        }
+
+        console.log(`Verifying against channel: ${channelUsername}`);
+
+        // টেলিগ্রাম API কল
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${channelUsername}&user_id=${userId}`;
         const response = await axios.get(url);
         
@@ -66,14 +78,18 @@ app.post('/api/verify-channel-task', async (req, res) => {
         if (isMember) {
             res.json({ success: true });
         } else {
-            res.json({ success: false, message: "Not joined" });
+            res.json({ success: false, message: "Not joined yet! Please join first." });
         }
 
     } catch (error) {
-        console.error("Task Verify Error:", error.message);
-        // যদি বট ওই চ্যানেলে এডমিন না থাকে, তবে এরর দিবে। 
-        // ইউজারকে আটকানোর চেয়ে এরর হলে সাকসেস দেওয়া ভালো, অথবা ফলস দিতে পারেন।
-        res.json({ success: false, message: "Bot is not admin in that channel or Invalid Link" });
+        console.error("Verify API Error:", error.response ? error.response.data : error.message);
+        
+        // বট এডমিন না থাকলে বা চ্যানেল প্রাইভেট হলে এই এরর হ্যান্ডেলিং
+        if (error.response && error.response.data.description.includes("chat not found")) {
+             return res.json({ success: false, message: "Invalid Channel Link or Bot not Admin" });
+        }
+        
+        res.status(500).json({ success: false, message: "Server Error or Bot is not Admin" });
     }
 });
 
@@ -92,130 +108,77 @@ app.post('/api/verify-member', async (req, res) => {
     }
 });
 
-// 3. টাস্ক ব্রডকাস্ট (সবাইকে মেসেজ পাঠানো)
+// 3. টাস্ক ব্রডকাস্ট
 app.post('/api/broadcast-task', async (req, res) => {
     const { caption, target, reward, link } = req.body;
-
     const msg = `New Task Created ✅\n\n` +
                 `Task Caption : ${caption}\n` +
                 `Target User : ${target}\n` +
                 `Reward : ${reward} ৳\n\n` +
                 `@RedoExchange`;
+    const keyboard = { inline_keyboard: [[{ text: "Join Task 👈", url: link || "https://t.me/RedoExchangeBot/app" }]] };
 
-    const keyboard = {
-        inline_keyboard: [[{ text: "Join Task 👈", url: link || "https://t.me/RedoExchangeBot/app" }]]
-    };
-
-    // রেসপন্স আগে পাঠিয়ে দেওয়া যাতে অ্যাডমিন প্যানেল হ্যাং না করে
     res.json({ success: true, message: "Broadcasting started..." });
 
     try {
         const usersSnapshot = await db.collection('users').get();
-        
         let count = 0;
         const users = usersSnapshot.docs.map(doc => doc.id);
-
         const sendNext = async () => {
             if (count >= users.length) return;
             const userId = users[count];
             try {
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: userId,
-                    text: msg,
-                    reply_markup: keyboard
+                    chat_id: userId, text: msg, reply_markup: keyboard
                 });
-            } catch (e) { 
-                // ইউজার ব্লক করলে ইগনোর করবে
-            }
+            } catch (e) {}
             count++;
-            setTimeout(sendNext, 50); // ৫০ মিলি সেকেন্ড বিরতি
+            setTimeout(sendNext, 50);
         };
         sendNext();
-
-    } catch (error) {
-        console.error("Broadcast Error:", error.message);
-    }
+    } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// 4. অ্যাডমিন অ্যাকশন (Deposit & Exchange Approval)
+// 4. অ্যাডমিন অ্যাকশন (Deposit & Exchange)
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod, userNumber, trxId, status, type, referrerId } = req.body;
-
     const icon = status === 'Approved' ? '✅' : '❎';
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
 
-    // --- DEPOSIT LOGIC ---
+    // DEPOSIT LOGIC
     if (type === "Deposit" && status === 'Approved') {
         const depositAmount = parseFloat(amount);
         const commissionRate = 0.015; // 1.5%
         const commission = depositAmount * commissionRate;
-        const userFinalAmount = depositAmount - commission; // ইউজারের অ্যামাউন্ট থেকে কমিশন কাটা হলো
+        const userFinalAmount = depositAmount - commission;
 
         try {
-            // ১. ইউজারের মেইন ব্যালেন্স আপডেট
             await db.collection('users').doc(String(userId)).update({
                 mainBalance: admin.firestore.FieldValue.increment(userFinalAmount)
             });
-
-            // ২. রেফারার থাকলে তাকে ১.৫% কমিশন দেওয়া
             if (referrerId) {
                 await db.collection('users').doc(String(referrerId)).update({
                     mainBalance: admin.firestore.FieldValue.increment(commission),
                     refEarnings: admin.firestore.FieldValue.increment(commission)
                 });
-
-                // রেফারারকে মেসেজ
-                const refMsg = `New Deposit Commission Added 💰\n` +
-                               `From User: @${userName}\n` +
-                               `Commission: ${commission.toFixed(2)} ৳\n` +
-                               `<blockquote>(1.5% from Deposit)</blockquote>`;
-                
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: referrerId, text: refMsg, parse_mode: 'HTML'
-                }).catch(e => {});
+                const refMsg = `New Deposit Commission Added 💰\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(1.5% from Deposit)</blockquote>`;
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
-
-            // ৩. ডিপোজিটকারীকে মেসেজ
-            const userMsg = `Your Deposit Approved! ${icon}\n\n` +
-                            `Original Amount: ${amount} ৳\n` +
-                            `Fee (1.5%): -${commission.toFixed(2)} ৳\n` +
-                            `Added to Balance: ${userFinalAmount.toFixed(2)} ৳\n\n` +
-                            `@RedoExchange`;
-            
+            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (1.5%): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedoExchange`;
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                 chat_id: userId, text: userMsg, parse_mode: 'HTML',
                 reply_markup: { inline_keyboard: [[{ text: "Check Wallet 💰", url: "https://t.me/RedoExchangeBot/app" }]] }
             });
-
             return res.json({ success: true });
-
-        } catch (error) {
-            console.error("Deposit Error:", error);
-            return res.json({ success: false });
-        }
+        } catch (error) { return res.json({ success: false }); }
     }
 
-    // --- EXCHANGE LOGIC ---
+    // EXCHANGE LOGIC
     if (type === "Exchange") {
-        const msg = `Your Exchange Request ${actionText}. ${icon}\n\n` +
-                    `Username : @${userName}\n` +
-                    `Amount : $${amount}\n` +
-                    `Payment Method : ${receiveMethod}\n` +
-                    `Payment Number : <code>${userNumber}</code>\n` +
-                    `Transaction ID : <code>${trxId}</code>\n` +
-                    `Date : ${new Date().toLocaleString()}\n\n` +
-                    `@RedoExchange`;
-
-        const keyboard = {
-            inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedoExchangeBot/app" }]]
-        };
-
+        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedoExchange`;
+        const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedoExchangeBot/app" }]] };
         try {
-            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
-            });
-
-            // এক্সচেঞ্জ এপ্রুভ হলে রেফার কমিশন
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
             if (status === 'Approved' && referrerId && bdtAmount) {
                 const exCommission = (parseFloat(bdtAmount) * 0.015).toFixed(2);
                 await db.collection('users').doc(String(referrerId)).update({
@@ -224,39 +187,26 @@ app.post('/api/admin/action', async (req, res) => {
                 });
             }
             res.json({ success: true });
-        } catch (error) {
-            res.json({ success: false });
-        }
-    } 
-    // Withdraw বা অন্যান্য রিজেকশন মেসেজ
-    else {
+        } catch (error) { res.json({ success: false }); }
+    } else {
         if (status === 'Rejected') {
-             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                chat_id: userId, text: `Your ${type} request has been Rejected. ❌`, parse_mode: 'HTML'
-            }).catch(e=>{});
+             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: `Your ${type} request has been Rejected. ❌`, parse_mode: 'HTML' }).catch(e=>{});
         }
         res.json({ success: true });
     }
 });
 
-// 5. নতুন রেফার জয়েন নোটিফিকেশন
+// Notifications
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName } = req.body;
-    const msg = `New Refer 🎉\n` +
-                `Username : ${newUserName}\n\n` +
-                `<blockquote>(আপনার রেফার করা ব্যক্তি Exchange/Deposit করলে আপনি ১.৫% কমিশন পাবেন)</blockquote>`;
-
     try {
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            chat_id: referrerId, text: msg, parse_mode: 'HTML'
+            chat_id: referrerId, text: `New Refer 🎉\nUsername : ${newUserName}\n\n<blockquote>(You get 1.5% commission on their Exchange/Deposit)</blockquote>`, parse_mode: 'HTML'
         });
         res.json({ success: true });
-    } catch (error) {
-        res.json({ success: false });
-    }
+    } catch (error) { res.json({ success: false }); }
 });
 
-// 6. এডমিন নোটিফিকেশনস
 app.post('/api/notify-withdraw', async (req, res) => {
     const { username, amount, method, number } = req.body;
     await sendMessageToTelegram(ADMIN_ID, `<b>Withdraw Request</b>\nUser: @${username}\nAmount: ${amount} Tk\nMethod: ${method}\nNumber: ${number}`);
@@ -270,14 +220,8 @@ app.post('/api/notify-exchange', async (req, res) => {
 });
 
 async function sendMessageToTelegram(chatId, text) {
-    try {
-        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            chat_id: chatId, text: text, parse_mode: 'HTML'
-        });
-    } catch (e) { console.error(e.message); }
+    try { await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: text, parse_mode: 'HTML' }); } catch (e) {}
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
