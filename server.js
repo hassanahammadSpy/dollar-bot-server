@@ -1,4 +1,4 @@
-// server.js - Final Fixed Version (With Better Link Parsing)
+// server.js - Final Fixed Version
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -16,7 +16,6 @@ const ADMIN_ID = process.env.ADMIN_ID;
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
     try {
-        // ফায়ারবেস কি যদি স্ট্রিং হয়, পার্স করবে
         const serviceAccount = typeof process.env.FIREBASE_KEY === 'string' 
             ? JSON.parse(process.env.FIREBASE_KEY) 
             : process.env.FIREBASE_KEY;
@@ -47,28 +46,21 @@ app.post('/api/verify-channel-task', async (req, res) => {
         }
 
         const taskData = taskSnap.data();
-        let link = taskData.link.trim(); // লিংক থেকে স্পেস সরাবে
+        let link = taskData.link ? taskData.link.trim() : "";
         let channelUsername = "";
 
-        // লিংক থেকে ইউজারনেম বের করার লজিক
         if (link.includes("t.me/")) {
-            // https://t.me/username -> username
             channelUsername = link.split("t.me/")[1].split("/")[0].split("?")[0];
         } else if (link.startsWith("@")) {
-            // @username -> username
             channelUsername = link.replace("@", "");
         } else {
-            channelUsername = link; // শুধু username দেওয়া থাকলে
+            channelUsername = link;
         }
 
-        // সামনে @ যুক্ত করা (Telegram API এর জন্য)
         if (!channelUsername.startsWith("@")) {
             channelUsername = "@" + channelUsername;
         }
 
-        console.log(`Verifying against channel: ${channelUsername}`);
-
-        // টেলিগ্রাম API কল
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${channelUsername}&user_id=${userId}`;
         const response = await axios.get(url);
         
@@ -82,13 +74,10 @@ app.post('/api/verify-channel-task', async (req, res) => {
         }
 
     } catch (error) {
-        console.error("Verify API Error:", error.response ? error.response.data : error.message);
-        
-        // বট এডমিন না থাকলে বা চ্যানেল প্রাইভেট হলে এই এরর হ্যান্ডেলিং
+        console.error("Verify Error:", error.response ? error.response.data : error.message);
         if (error.response && error.response.data.description.includes("chat not found")) {
-             return res.json({ success: false, message: "Invalid Channel Link or Bot not Admin" });
+             return res.json({ success: false, message: "Bot not Admin or Invalid Link" });
         }
-        
         res.status(500).json({ success: false, message: "Server Error or Bot is not Admin" });
     }
 });
@@ -139,16 +128,15 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// 4. অ্যাডমিন অ্যাকশন (Deposit & Exchange)
+// 4. অ্যাডমিন অ্যাকশন
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod, userNumber, trxId, status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
 
-    // DEPOSIT LOGIC
     if (type === "Deposit" && status === 'Approved') {
         const depositAmount = parseFloat(amount);
-        const commissionRate = 0.015; // 1.5%
+        const commissionRate = 0.015;
         const commission = depositAmount * commissionRate;
         const userFinalAmount = depositAmount - commission;
 
@@ -173,7 +161,6 @@ app.post('/api/admin/action', async (req, res) => {
         } catch (error) { return res.json({ success: false }); }
     }
 
-    // EXCHANGE LOGIC
     if (type === "Exchange") {
         const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedoExchange`;
         const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedoExchangeBot/app" }]] };
