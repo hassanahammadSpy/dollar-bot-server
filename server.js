@@ -65,7 +65,7 @@ app.post('/api/verify-channel-task', async (req, res) => {
         const response = await axios.get(url);
         
         const status = response.data.result.status;
-        const isMember = ['creator', 'administrator', 'member', 'restricted'].includes(status);
+        const isMember =['creator', 'administrator', 'member', 'restricted'].includes(status);
 
         if (isMember) {
             res.json({ success: true });
@@ -90,22 +90,29 @@ app.post('/api/verify-member', async (req, res) => {
         const url = `https://api.telegram.org/bot${BOT_TOKEN}/getChatMember?chat_id=${channel}&user_id=${userId}`;
         const response = await axios.get(url);
         const status = response.data.result.status;
-        const isMember = ['creator', 'administrator', 'member'].includes(status);
+        const isMember =['creator', 'administrator', 'member'].includes(status);
         res.json({ isMember: isMember });
     } catch (error) {
         res.json({ isMember: false });
     }
 });
 
-// 3. টাস্ক ব্রডকাস্ট
+// 3. টাস্ক ব্রডকাস্ট (MODIFIED AS REQUESTED)
 app.post('/api/broadcast-task', async (req, res) => {
-    const { caption, target, reward, link } = req.body;
-    const msg = `New Task Created ✅\n\n` +
-                `Task Caption : ${caption}\n` +
-                `Target User : ${target}\n` +
-                `Reward : ${reward} ৳\n\n` +
-                `@RedoExchange`;
-    const keyboard = { inline_keyboard: [[{ text: "Join Task 👈", url: link || "https://t.me/RedoExchangeBot/app" }]] };
+    // usdRate (Binance Pay রেট) frontend থেকে পাঠাতে পারবেন, না পাঠালে ডিফল্ট ১২০ ধরা হবে
+    const { caption, target, reward, link, usdRate = 120 } = req.body; 
+    
+    // Reward কে ডলার এ কনভার্ট করা হচ্ছে
+    const dollarReward = (parseFloat(reward) / usdRate).toFixed(3);
+
+    const msg = `<b>🆕 New Task Available!</b>\n\n` +
+                `📋 Task: ${caption}\n` +
+                `👥 Slots: ${target}\n` +
+                `💰 Reward: ${reward}৳ = ${dollarReward}$\n\n` +
+                `Complete the task to earn rewards!\n\n` +
+                `@RedExChanger`;
+                
+    const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
 
     res.json({ success: true, message: "Broadcasting started..." });
 
@@ -118,7 +125,7 @@ app.post('/api/broadcast-task', async (req, res) => {
             const userId = users[count];
             try {
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: userId, text: msg, reply_markup: keyboard
+                    chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
                 });
             } catch (e) {}
             count++;
@@ -152,18 +159,18 @@ app.post('/api/admin/action', async (req, res) => {
                 const refMsg = `New Deposit Commission Added 💰\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(1.5% from Deposit)</blockquote>`;
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
-            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (1.5%): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedoExchange`;
+            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (1.5%): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                 chat_id: userId, text: userMsg, parse_mode: 'HTML',
-                reply_markup: { inline_keyboard: [[{ text: "Check Wallet 💰", url: "https://t.me/RedoExchangeBot/app" }]] }
+                reply_markup: { inline_keyboard: [[{ text: "Check Wallet 💰", url: "https://t.me/RedExChangerBot/app" }]] }
             });
             return res.json({ success: true });
         } catch (error) { return res.json({ success: false }); }
     }
 
     if (type === "Exchange") {
-        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedoExchange`;
-        const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedoExchangeBot/app" }]] };
+        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedExChanger`;
+        const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedExChangerBot/app" }]] };
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
             if (status === 'Approved' && referrerId && bdtAmount) {
@@ -183,12 +190,39 @@ app.post('/api/admin/action', async (req, res) => {
     }
 });
 
-// Notifications
+// Notifications (MODIFIED AS REQUESTED)
 app.post('/api/notify-refer-join', async (req, res) => {
-    const { referrerId, newUserName } = req.body;
+    // newUserName (old data) এর সাথে firstName ও totalRefer রিসিভ করা হচ্ছে
+    const { referrerId, newUserName, firstName, totalRefer } = req.body;
+    
+    // ফ্রন্টএন্ড থেকে Total Refer না পাঠালে ডাটাবেস থেকে অটোমেটিক বের করার ব্যবস্থা (যাতে কোনো এরর না আসে)
+    let referCount = totalRefer;
+    if (!referCount) {
+        try {
+            const userDoc = await db.collection('users').doc(String(referrerId)).get();
+            if (userDoc.exists) {
+                const userData = userDoc.data();
+                referCount = userData.referrals ? userData.referrals.length : 1; 
+            } else {
+                referCount = 1;
+            }
+        } catch (e) {
+            referCount = 1;
+        }
+    }
+
+    const nameToShow = firstName || newUserName || "User";
+
+    const msg = `<b>🆕 New Refer Joined!</b>\n\n` +
+                `Name: ${nameToShow}\n` +
+                `Total Refer: ${referCount}\n\n` +
+                `<i>You will receive a 0.1% commission when the person you refer makes a deposit or exchange.</i>`;
+                
+    const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
+
     try {
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            chat_id: referrerId, text: `New Refer 🎉\nUsername : ${newUserName}\n\n<blockquote>(You get 1.5% commission on their Exchange/Deposit)</blockquote>`, parse_mode: 'HTML'
+            chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
         });
         res.json({ success: true });
     } catch (error) { res.json({ success: false }); }
