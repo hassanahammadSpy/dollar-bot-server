@@ -32,7 +32,7 @@ if (process.env.FIREBASE_KEY) {
 }
 const db = admin.firestore();
 
-// 1. চ্যানেল টাস্ক ভেরিফিকেশন (IMPROVED LOGIC)
+// 1. চ্যানেল টাস্ক ভেরিফিকেশন
 app.post('/api/verify-channel-task', async (req, res) => {
     const { userId, taskId } = req.body;
     console.log(`Checking Task: ${taskId} for User: ${userId}`);
@@ -97,12 +97,60 @@ app.post('/api/verify-member', async (req, res) => {
     }
 });
 
-// 3. টাস্ক ব্রডকাস্ট (MODIFIED AS REQUESTED)
-app.post('/api/broadcast-task', async (req, res) => {
-    // usdRate (Binance Pay রেট) frontend থেকে পাঠাতে পারবেন, না পাঠালে ডিফল্ট ১২০ ধরা হবে
-    const { caption, target, reward, link, usdRate = 120 } = req.body; 
+// ==========================================
+// NEW: Broadcast Message API (With Image & Button)
+// ==========================================
+app.post('/api/broadcast-message', async (req, res) => {
+    const { image, text, btnText, btnUrl } = req.body;
     
-    // Reward কে ডলার এ কনভার্ট করা হচ্ছে
+    // সাথে সাথে ফ্রন্টএন্ডে রেসপন্স পাঠিয়ে দেওয়া হলো যাতে প্যানেল লোড না নেয়
+    res.json({ success: true, message: "Broadcasting message started..." });
+
+    try {
+        const usersSnapshot = await db.collection('users').get();
+        const users = usersSnapshot.docs.map(doc => doc.id);
+
+        let reply_markup = {};
+        if (btnText && btnUrl) {
+            reply_markup = { inline_keyboard: [[{ text: btnText, url: btnUrl }]] };
+        }
+
+        let count = 0;
+        const sendNext = async () => {
+            if (count >= users.length) return;
+            const userId = users[count];
+            
+            try {
+                if (image) {
+                    // ইমেজ থাকলে sendPhoto ব্যবহার করা হবে
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                        chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup
+                    });
+                } else {
+                    // ইমেজ না থাকলে sendMessage
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                        chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup
+                    });
+                }
+            } catch (e) {
+                // ইউজার বট ব্লক করলে এরর স্কিপ করবে
+            }
+            
+            count++;
+            setTimeout(sendNext, 50); // Telegram Rate Limit এড়াতে 50ms ডিলে
+        };
+        sendNext();
+    } catch (error) { 
+        console.error("Broadcast Msg Error:", error.message); 
+    }
+});
+
+// ==========================================
+// MODIFIED: Task Broadcast (With Image Support)
+// ==========================================
+app.post('/api/broadcast-task', async (req, res) => {
+    const { caption, target, reward, link, image, usdRate = 120 } = req.body; 
+    
     const dollarReward = (parseFloat(reward) / usdRate).toFixed(3);
 
     const msg = `<b>🆕 New Task Available!</b>\n\n` +
@@ -120,13 +168,20 @@ app.post('/api/broadcast-task', async (req, res) => {
         const usersSnapshot = await db.collection('users').get();
         let count = 0;
         const users = usersSnapshot.docs.map(doc => doc.id);
+        
         const sendNext = async () => {
             if (count >= users.length) return;
             const userId = users[count];
             try {
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
-                });
+                if (image) {
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                        chat_id: userId, photo: image, caption: msg, parse_mode: 'HTML', reply_markup: keyboard
+                    });
+                } else {
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                        chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
+                    });
+                }
             } catch (e) {}
             count++;
             setTimeout(sendNext, 50);
@@ -135,9 +190,10 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// 4. অ্যাডমিন অ্যাকশন
+// 4. অ্যাডমিন অ্যাকশন (MODIFIED to prevent undefined text issues)
 app.post('/api/admin/action', async (req, res) => {
-    const { userId, userName, amount, bdtAmount, receiveMethod, userNumber, trxId, status, type, referrerId } = req.body;
+    // ডিফল্ট 'N/A' দেওয়া হলো যাতে ফ্রন্টএন্ড থেকে ভ্যালু না আসলেও undefined না দেখায়
+    const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
 
@@ -190,12 +246,10 @@ app.post('/api/admin/action', async (req, res) => {
     }
 });
 
-// Notifications (MODIFIED AS REQUESTED)
+// Notifications
 app.post('/api/notify-refer-join', async (req, res) => {
-    // newUserName (old data) এর সাথে firstName ও totalRefer রিসিভ করা হচ্ছে
     const { referrerId, newUserName, firstName, totalRefer } = req.body;
     
-    // ফ্রন্টএন্ড থেকে Total Refer না পাঠালে ডাটাবেস থেকে অটোমেটিক বের করার ব্যবস্থা (যাতে কোনো এরর না আসে)
     let referCount = totalRefer;
     if (!referCount) {
         try {
