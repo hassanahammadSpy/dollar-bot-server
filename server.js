@@ -190,9 +190,8 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// 4. অ্যাডমিন অ্যাকশন (MODIFIED to prevent undefined text issues)
+// 4. অ্যাডমিন অ্যাকশন
 app.post('/api/admin/action', async (req, res) => {
-    // ডিফল্ট 'N/A' দেওয়া হলো যাতে ফ্রন্টএন্ড থেকে ভ্যালু না আসলেও undefined না দেখায়
     const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
@@ -246,29 +245,45 @@ app.post('/api/admin/action', async (req, res) => {
     }
 });
 
-// Notifications
+// Notifications (FIXED - 100% Working Setup)
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName, firstName, totalRefer } = req.body;
     
+    if (!referrerId) {
+        return res.json({ success: false, message: "No referrer ID provided" });
+    }
+
+    // 1. Total Refer কাউন্ট ডাটাবেস থেকে সঠিকভাবে বের করা (Array ও Number দুইটার জন্যই কাজ করবে)
     let referCount = totalRefer;
-    if (!referCount) {
+    if (referCount === undefined || referCount === null) {
         try {
             const userDoc = await db.collection('users').doc(String(referrerId)).get();
             if (userDoc.exists) {
                 const userData = userDoc.data();
-                referCount = userData.referrals ? userData.referrals.length : 1; 
+                if (Array.isArray(userData.referrals)) {
+                    referCount = userData.referrals.length;
+                } else if (typeof userData.referrals === 'number') {
+                    referCount = userData.referrals;
+                } else if (typeof userData.totalRefer === 'number') {
+                    referCount = userData.totalRefer;
+                } else {
+                    referCount = 1; 
+                }
             } else {
                 referCount = 1;
             }
         } catch (e) {
+            console.error("Refer fetch error:", e.message);
             referCount = 1;
         }
     }
 
-    const nameToShow = firstName || newUserName || "User";
+    // 2. ইউজারের নামে < বা > থাকলে Telegram API Error দেয়, তাই Name Sanitize করা হচ্ছে
+    const rawName = firstName || newUserName || "User";
+    const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
     const msg = `<b>🆕 New Refer Joined!</b>\n\n` +
-                `Name: ${nameToShow}\n` +
+                `Name: ${safeName}\n` +
                 `Total Refer: ${referCount}\n\n` +
                 `<i>You will receive a 0.1% commission when the person you refer makes a deposit or exchange.</i>`;
                 
@@ -279,7 +294,10 @@ app.post('/api/notify-refer-join', async (req, res) => {
             chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
         });
         res.json({ success: true });
-    } catch (error) { res.json({ success: false }); }
+    } catch (error) { 
+        console.error("Telegram Refer Notify Error:", error.response ? error.response.data : error.message);
+        res.json({ success: false }); 
+    }
 });
 
 app.post('/api/notify-withdraw', async (req, res) => {
