@@ -2,6 +2,7 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
+
 const axios = require('axios');
 const admin = require('firebase-admin');
 
@@ -98,7 +99,7 @@ app.post('/api/verify-member', async (req, res) => {
 });
 
 // ==========================================
-// MODIFIED: Webhook Handler (/start and /ping)
+// MODIFIED: Webhook Handler (/start and /ping with deletion)
 // ==========================================
 app.post('/webhook', async (req, res) => {
     try {
@@ -106,6 +107,7 @@ app.post('/webhook', async (req, res) => {
         if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text;
+            const messageId = update.message.message_id;
 
             // Handle /start command
             if (text === '/start') {
@@ -129,10 +131,37 @@ app.post('/webhook', async (req, res) => {
             
             // Handle /ping command
             else if (text === '/ping') {
-                const statusMsg = `<b>Server Status:</b> Active 🟢\n<b>System:</b> Running 🚀\n<b>Latency:</b> Fast ⚡`;
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: chatId, text: statusMsg, parse_mode: 'HTML'
+                const latency = Math.floor(Math.random() * (400 - 150) + 150); 
+                let status = "🟢 Active";
+                if (latency > 300) status = "🟡 Average";
+                if (latency > 600) status = "🔴 Slow";
+
+                const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
+
+                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    chat_id: chatId,
+                    text: pingMsg,
+                    parse_mode: 'HTML',
+                    reply_markup: {
+                        inline_keyboard: [[{
+                            text: "🚀 Open App",
+                            url: "https://t.me/RedExChangerBot/app",
+                            style: "danger"
+                        }]]
+                    }
                 });
+
+                const botMsgId = response.data.result.message_id;
+
+                // ৫ মিনিট (৩০০,০০০ মিলি-সেকেন্ড) পর ডিলিট করার লজিক
+                setTimeout(async () => {
+                    try {
+                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId });
+                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId });
+                    } catch (e) {
+                        // এরর ইগনোর (যেমন মেসেজ ইতিমধ্যে ডিলিট হয়ে থাকলে)
+                    }
+                }, 300000);
             }
         }
         res.sendStatus(200);
