@@ -98,33 +98,42 @@ app.post('/api/verify-member', async (req, res) => {
 });
 
 // ==========================================
-// NEW: Webhook Handler for /start Command
+// MODIFIED: Webhook Handler (/start and /ping)
 // ==========================================
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
-        if (update.message && update.message.text === '/start') {
+        if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
-            const firstName = update.message.from.first_name || "User";
+            const text = update.message.text;
 
-            const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
+            // Handle /start command
+            if (text === '/start') {
+                const firstName = update.message.from.first_name || "User";
+                const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
 
-            const keyboard = {
-                inline_keyboard: [
-                    [{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }],
-                    [
-                        { text: "📢 Join Channel", url: "https://t.me/RedExChanger" },
-                        { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }
+                const keyboard = {
+                    inline_keyboard: [
+                        [{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }],
+                        [
+                            { text: "📢 Join Channel", url: "https://t.me/RedExChanger" },
+                            { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }
+                        ]
                     ]
-                ]
-            };
+                };
 
-            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                chat_id: chatId,
-                text: welcomeMsg,
-                reply_markup: keyboard,
-                parse_mode: 'HTML'
-            });
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML'
+                });
+            } 
+            
+            // Handle /ping command
+            else if (text === '/ping') {
+                const statusMsg = `<b>Server Status:</b> Active 🟢\n<b>System:</b> Running 🚀\n<b>Latency:</b> Fast ⚡`;
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    chat_id: chatId, text: statusMsg, parse_mode: 'HTML'
+                });
+            }
         }
         res.sendStatus(200);
     } catch (error) {
