@@ -98,6 +98,42 @@ app.post('/api/verify-member', async (req, res) => {
 });
 
 // ==========================================
+// NEW: Webhook Handler for /start Command
+// ==========================================
+app.post('/webhook', async (req, res) => {
+    try {
+        const update = req.body;
+        if (update.message && update.message.text === '/start') {
+            const chatId = update.message.chat.id;
+            const firstName = update.message.from.first_name || "User";
+
+            const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
+
+            const keyboard = {
+                inline_keyboard: [
+                    [{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }],
+                    [
+                        { text: "📢 Join Channel", url: "https://t.me/RedExChanger" },
+                        { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }
+                    ]
+                ]
+            };
+
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                chat_id: chatId,
+                text: welcomeMsg,
+                reply_markup: keyboard,
+                parse_mode: 'HTML'
+            });
+        }
+        res.sendStatus(200);
+    } catch (error) {
+        console.error("Webhook Error:", error.message);
+        res.sendStatus(200);
+    }
+});
+
+// ==========================================
 // NEW: Broadcast Message API (With Image & Button)
 // ==========================================
 app.post('/api/broadcast-message', async (req, res) => {
@@ -253,7 +289,7 @@ app.post('/api/notify-refer-join', async (req, res) => {
         return res.json({ success: false, message: "No referrer ID provided" });
     }
 
-    // 1. Total Refer কাউন্ট ডাটাবেস থেকে সঠিকভাবে বের করা (Array ও Number দুইটার জন্যই কাজ করবে)
+    // 1. Total Refer কাউন্ট ডাটাবেস থেকে সঠিকভাবে বের করা
     let referCount = totalRefer;
     if (referCount === undefined || referCount === null) {
         try {
@@ -278,7 +314,7 @@ app.post('/api/notify-refer-join', async (req, res) => {
         }
     }
 
-    // 2. ইউজারের নামে < বা > থাকলে Telegram API Error দেয়, তাই Name Sanitize করা হচ্ছে
+    // 2. Name Sanitize করা হচ্ছে
     const rawName = firstName || newUserName || "User";
     const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
