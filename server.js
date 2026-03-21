@@ -1,4 +1,4 @@
-// server.js - Final Version with Dynamic App Link
+// server.js - Final Advanced Version
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -11,7 +11,7 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN; 
-const ADMIN_ID = process.env.ADMIN_ID; 
+const ADMIN_ID = process.env.ADMIN_ID; // আপনার আইডি: 7767338426 (Render এ সেট করবেন)
 
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
@@ -32,7 +32,7 @@ if (process.env.FIREBASE_KEY) {
 }
 const db = admin.firestore();
 
-// Helper: Get Dynamic App Link from Firebase
+// Helper: Get Dynamic App Link from Firebase Admin Panel Settings
 async function getAppLink() {
     try {
         const settingsSnap = await db.collection('settings').doc('appConfig').get();
@@ -61,7 +61,7 @@ app.post('/api/verify-channel-task', async (req, res) => {
         const response = await axios.get(url);
         const status = response.data.result.status;
         const isMember =['creator', 'administrator', 'member', 'restricted'].includes(status);
-        res.json({ success: isMember, message: isMember ? "" : "Not joined yet! Please join first." });
+        res.json({ success: isMember, message: isMember ? "" : "Not joined yet!" });
     } catch (error) { res.status(500).json({ success: false }); }
 });
 
@@ -85,6 +85,7 @@ app.post('/webhook', async (req, res) => {
         const update = req.body;
         const appLink = await getAppLink();
 
+        // Handle Callback Buttons (Approve / Dismiss)
         if (update.callback_query) {
             const cb = update.callback_query;
             if (String(cb.from.id) === String(ADMIN_ID)) {
@@ -94,6 +95,8 @@ app.post('/webhook', async (req, res) => {
 
                 if (docSnap.exists && docSnap.data().status === 'Pending') {
                     const data = docSnap.data();
+                    
+                    // Trigger Admin Action Logic
                     const actionResponse = await axios.post(`http://localhost:${PORT}/api/admin/action`, {
                         ...data,
                         userId: data.userId,
@@ -104,11 +107,15 @@ app.post('/webhook', async (req, res) => {
                         status: action,
                         type: type
                     });
+
                     if (actionResponse.data.success) {
                         const icon = action === 'Approved' ? '✅' : '❌';
+                        const newText = cb.message.text + `\n\n━━━━━━━━━━━━━━━\n<b>Status: ${action} ${icon}</b>`;
+                        
                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
-                            chat_id: cb.message.chat.id, message_id: cb.message.message_id,
-                            text: cb.message.text + `\n\n━━━━━━━━━━━━━━━\n<b>Status: ${action} ${icon}</b>`,
+                            chat_id: cb.message.chat.id,
+                            message_id: cb.message.message_id,
+                            text: newText,
                             parse_mode: 'HTML'
                         });
                     }
@@ -117,6 +124,7 @@ app.post('/webhook', async (req, res) => {
             return res.sendStatus(200);
         }
 
+        // Handle Messages
         if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text;
@@ -130,8 +138,8 @@ app.post('/webhook', async (req, res) => {
             } 
             else if (text === '/ping') {
                 const latency = Math.floor(Math.random() * (400 - 150) + 150); 
-                let status = latency > 600 ? "🔴 Slow" : (latency > 300 ? "🟡 Average" : "🟢 Active");
-                const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
+                const status = latency > 300 ? (latency > 600 ? "🔴 Slow" : "🟡 Average") : "🟢 Active";
+                const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time.\n🗑 This will be deleted after 5 minutes.`;
                 const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: pingMsg, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: appLink }]] } });
                 setTimeout(async () => {
                     try {
@@ -185,7 +193,7 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (e) {}
 });
 
-// Admin Action
+// Admin Action Logic (Handles Balance, Commission and Notifications)
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod, trxId, status, type, referrerId } = req.body;
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
@@ -232,7 +240,7 @@ app.post('/api/notify-refer-join', async (req, res) => {
     } catch (e) { res.json({ success: false }); }
 });
 
-// Admin Request Notifications
+// Admin Notification Core
 const notifyAdmin = async (type, docId, msg) => {
     const keyboard = { inline_keyboard: [[{ text: "✅ Approve", callback_data: `Approved:${type}:${docId}` }, { text: "❌ Dismiss", callback_data: `Rejected:${type}:${docId}` }]] };
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: ADMIN_ID, text: msg, parse_mode: 'HTML', reply_markup: keyboard }).catch(e=>{});
