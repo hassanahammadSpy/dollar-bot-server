@@ -1,4 +1,4 @@
-// server.js - Final Fixed Version
+// server.js - Final Fixed Version with Admin Notifications
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -99,7 +99,7 @@ app.post('/api/verify-member', async (req, res) => {
 });
 
 // ==========================================
-// MODIFIED: Webhook Handler (/start and /ping with deletion)
+// Webhook Handler (/start and /ping)
 // ==========================================
 app.post('/webhook', async (req, res) => {
     try {
@@ -109,7 +109,6 @@ app.post('/webhook', async (req, res) => {
             const text = update.message.text;
             const messageId = update.message.message_id;
 
-            // Handle /start command
             if (text === '/start') {
                 const firstName = update.message.from.first_name || "User";
                 const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
@@ -129,7 +128,6 @@ app.post('/webhook', async (req, res) => {
                 });
             } 
             
-            // Handle /ping command
             else if (text === '/ping') {
                 const latency = Math.floor(Math.random() * (400 - 150) + 150); 
                 let status = "🟢 Active";
@@ -139,28 +137,17 @@ app.post('/webhook', async (req, res) => {
                 const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
 
                 const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: chatId,
-                    text: pingMsg,
-                    parse_mode: 'HTML',
-                    reply_markup: {
-                        inline_keyboard: [[{
-                            text: "🚀 Open App",
-                            url: "https://t.me/RedExChangerBot/app",
-                            style: "danger"
-                        }]]
-                    }
+                    chat_id: chatId, text: pingMsg, parse_mode: 'HTML',
+                    reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }]] }
                 });
 
                 const botMsgId = response.data.result.message_id;
 
-                // ৫ মিনিট (৩০০,০০০ মিলি-সেকেন্ড) পর ডিলিট করার লজিক
                 setTimeout(async () => {
                     try {
                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId });
                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId });
-                    } catch (e) {
-                        // এরর ইগনোর (যেমন মেসেজ ইতিমধ্যে ডিলিট হয়ে থাকলে)
-                    }
+                    } catch (e) {}
                 }, 300000);
             }
         }
@@ -172,89 +159,57 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==========================================
-// NEW: Broadcast Message API (With Image & Button)
+// Broadcast APIs
 // ==========================================
 app.post('/api/broadcast-message', async (req, res) => {
     const { image, text, btnText, btnUrl } = req.body;
-    
-    // সাথে সাথে ফ্রন্টএন্ডে রেসপন্স পাঠিয়ে দেওয়া হলো যাতে প্যানেল লোড না নেয়
     res.json({ success: true, message: "Broadcasting message started..." });
-
     try {
         const usersSnapshot = await db.collection('users').get();
         const users = usersSnapshot.docs.map(doc => doc.id);
-
-        let reply_markup = {};
-        if (btnText && btnUrl) {
-            reply_markup = { inline_keyboard: [[{ text: btnText, url: btnUrl }]] };
-        }
+        let reply_markup = (btnText && btnUrl) ? { inline_keyboard: [[{ text: btnText, url: btnUrl }]] } : {};
 
         let count = 0;
         const sendNext = async () => {
             if (count >= users.length) return;
             const userId = users[count];
-            
             try {
                 if (image) {
-                    // ইমেজ থাকলে sendPhoto ব্যবহার করা হবে
                     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
                         chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup
                     });
                 } else {
-                    // ইমেজ না থাকলে sendMessage
                     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                         chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup
                     });
                 }
-            } catch (e) {
-                // ইউজার বট ব্লক করলে এরর স্কিপ করবে
-            }
-            
+            } catch (e) {}
             count++;
-            setTimeout(sendNext, 50); // Telegram Rate Limit এড়াতে 50ms ডিলে
+            setTimeout(sendNext, 50);
         };
         sendNext();
-    } catch (error) { 
-        console.error("Broadcast Msg Error:", error.message); 
-    }
+    } catch (error) { console.error("Broadcast Msg Error:", error.message); }
 });
 
-// ==========================================
-// MODIFIED: Task Broadcast (With Image Support)
-// ==========================================
 app.post('/api/broadcast-task', async (req, res) => {
     const { caption, target, reward, link, image, usdRate = 120 } = req.body; 
-    
     const dollarReward = (parseFloat(reward) / usdRate).toFixed(3);
-
-    const msg = `<b>🆕 New Task Available!</b>\n\n` +
-                `📋 Task: ${caption}\n` +
-                `👥 Slots: ${target}\n` +
-                `💰 Reward: ${reward}৳ = ${dollarReward}$\n\n` +
-                `Complete the task to earn rewards!\n\n` +
-                `@RedExChanger`;
-                
+    const msg = `<b>🆕 New Task Available!</b>\n\n📋 Task: ${caption}\n👥 Slots: ${target}\n💰 Reward: ${reward}৳ = ${dollarReward}$\n\nComplete the task to earn rewards!\n\n@RedExChanger`;
     const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
-
     res.json({ success: true, message: "Broadcasting started..." });
 
     try {
         const usersSnapshot = await db.collection('users').get();
-        let count = 0;
         const users = usersSnapshot.docs.map(doc => doc.id);
-        
+        let count = 0;
         const sendNext = async () => {
             if (count >= users.length) return;
             const userId = users[count];
             try {
                 if (image) {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-                        chat_id: userId, photo: image, caption: msg, parse_mode: 'HTML', reply_markup: keyboard
-                    });
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: msg, parse_mode: 'HTML', reply_markup: keyboard });
                 } else {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                        chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
-                    });
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
                 }
             } catch (e) {}
             count++;
@@ -264,7 +219,9 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// 4. অ্যাডমিন অ্যাকশন
+// ==========================================
+// Admin Actions (Approve/Reject)
+// ==========================================
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
@@ -319,38 +276,63 @@ app.post('/api/admin/action', async (req, res) => {
     }
 });
 
-// Notifications (FIXED - 100% Working Setup)
+// ==========================================
+// Admin Notifications (All requests sent to Admin Chat)
+// ==========================================
+
+// 1. Notify Deposit Request to Admin
+app.post('/api/notify-deposit', async (req, res) => {
+    const { username, userId, amount, method, number, trx } = req.body;
+    const adminMsg = `<b>💰 New Deposit Request</b>\n\n` +
+                     `User: @${username}\n` +
+                     `User ID: <code>${userId}</code>\n` +
+                     `Amount: ${amount} Tk\n` +
+                     `Method: ${method}\n` +
+                     `Sender Num: <code>${number}</code>\n` +
+                     `TrxID: <code>${trx}</code>\n\n` +
+                     `<i>Check Admin Panel to Approve.</i>`;
+    
+    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+    res.json({ success: true });
+});
+
+// 2. Notify Withdraw Request to Admin
+app.post('/api/notify-withdraw', async (req, res) => {
+    const { username, userId, amount, method, number } = req.body;
+    const adminMsg = `<b>📤 New Withdraw Request</b>\n\n` +
+                     `User: @${username}\n` +
+                     `User ID: <code>${userId || 'N/A'}</code>\n` +
+                     `Amount: ${amount} Tk\n` +
+                     `Method: ${method}\n` +
+                     `Receiver Num: <code>${number}</code>\n\n` +
+                     `<i>Process the payment and update status.</i>`;
+                     
+    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+    res.json({ success: true });
+});
+
+// 3. Notify Exchange Request to Admin
+app.post('/api/notify-exchange', async (req, res) => {
+    const { username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount } = req.body;
+    const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
+                     `User: @${username}\n` +
+                     `User ID: <code>${userId}</code>\n` +
+                     `Exchange: ${sendMethod} ➔ ${recMethod}\n` +
+                     `Amount: $${amount} (${bdtAmount} Tk)\n` +
+                     `Payment Num: <code>${number}</code>\n` +
+                     `TrxID: <code>${trx}</code>\n\n` +
+                     `<i>Check exchange details in panel.</i>`;
+                     
+    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+    res.json({ success: true });
+});
+
+// 4. Notify New Referral
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName, firstName, totalRefer } = req.body;
-    
-    if (!referrerId) {
-        return res.json({ success: false, message: "No referrer ID provided" });
-    }
+    if (!referrerId) return res.json({ success: false });
 
-    // 1. Total Refer কাউন্ট ডাটাবেস থেকে সঠিকভাবে বের করা
-    let referCount = totalRefer;
-    if (referCount === undefined || referCount === null) {
-        try {
-            const userDoc = await db.collection('users').doc(String(referrerId)).get();
-            if (userDoc.exists) {
-                const userData = userDoc.data();
-                if (userData.referrals) {
-                    referCount = Array.isArray(userData.referrals) ? userData.referrals.length : userData.referrals;
-                } else if (userData.totalRefer) {
-                    referCount = userData.totalRefer;
-                } else {
-                    referCount = 1;
-                }
-            } else {
-                referCount = 1;
-            }
-        } catch (e) {
-            console.error("Refer fetch error:", e.message);
-            referCount = 1;
-        }
-    }
-
-    // 2. Name Sanitize করা হচ্ছে
+    let referCount = totalRefer || 1;
     const rawName = firstName || newUserName || "User";
     const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -366,26 +348,20 @@ app.post('/api/notify-refer-join', async (req, res) => {
             chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
         });
         res.json({ success: true });
-    } catch (error) { 
-        console.error("Telegram Refer Notify Error:", error.response ? error.response.data : error.message);
-        res.json({ success: false }); 
-    }
+    } catch (error) { res.json({ success: false }); }
 });
 
-app.post('/api/notify-withdraw', async (req, res) => {
-    const { username, amount, method, number } = req.body;
-    await sendMessageToTelegram(ADMIN_ID, `<b>Withdraw Request</b>\nUser: @${username}\nAmount: ${amount} Tk\nMethod: ${method}\nNumber: ${number}`);
-    res.json({ success: true });
-});
-
-app.post('/api/notify-exchange', async (req, res) => {
-    const { username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount } = req.body;
-    await sendMessageToTelegram(ADMIN_ID, `New Exchange ✅\nUser: @${username}\nID: <code>${userId}</code>\n${sendMethod} -> ${recMethod}\nNum: <code>${number}</code>\nTrx: <code>${trx}</code>\nAmt: $${amount} (${bdtAmount} Tk)`);
-    res.json({ success: true });
-});
-
+// Utility: Send Message Helper
 async function sendMessageToTelegram(chatId, text) {
-    try { await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: text, parse_mode: 'HTML' }); } catch (e) {}
+    try { 
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
+            chat_id: chatId, 
+            text: text, 
+            parse_mode: 'HTML' 
+        }); 
+    } catch (e) {
+        console.error("Admin Notify Error:", e.message);
+    }
 }
 
 const PORT = process.env.PORT || 3000;
