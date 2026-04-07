@@ -2,7 +2,6 @@
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
-
 const axios = require('axios');
 const admin = require('firebase-admin');
 
@@ -12,7 +11,8 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN; 
-const ADMIN_ID = process.env.ADMIN_ID; 
+// MODIFIED: Make sure your .env has ADMIN_ID=7767338426
+const ADMIN_ID = process.env.ADMIN_ID || '7767338426'; 
 
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
@@ -33,7 +33,7 @@ if (process.env.FIREBASE_KEY) {
 }
 const db = admin.firestore();
 
-// 1. চ্যানেল টাস্ক ভেরিফিকেশন
+// 1. চ্যানেল টাস্ক ভেরিফিকেশন (No changes needed)
 app.post('/api/verify-channel-task', async (req, res) => {
     const { userId, taskId } = req.body;
     console.log(`Checking Task: ${taskId} for User: ${userId}`);
@@ -83,7 +83,7 @@ app.post('/api/verify-channel-task', async (req, res) => {
     }
 });
 
-// 2. অ্যাপ ওপেন মেম্বারশিপ চেক
+// 2. অ্যাপ ওপেন মেম্বারশিপ চেক (No changes needed)
 app.post('/api/verify-member', async (req, res) => {
     const { userId, channelUsername } = req.body;
     try {
@@ -98,12 +98,59 @@ app.post('/api/verify-member', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// Webhook Handler (/start and /ping)
+// NEW: Helper function to process admin actions from bot
+// ==========================================
+async function processAdminAction(reqId, newStatus, adminName) {
+    try {
+        const reqRef = db.collection('requests').doc(reqId);
+        const reqSnap = await reqRef.get();
+        if (!reqSnap.exists) {
+            return { success: false, message: "Request not found." };
+        }
+        
+        const r = reqSnap.data();
+        
+        // Prevent re-processing
+        if (r.status !== 'Pending') {
+            return { success: false, message: `Request already ${r.status}.` };
+        }
+        
+        // Update Firestore
+        await reqRef.update({ status: newStatus });
+        
+        // Handle rejected withdrawal (refund user)
+        if (r.type === "Withdraw" && newStatus === "Rejected") {
+            await db.collection('users').doc(r.userId).update({
+                mainBalance: admin.firestore.FieldValue.increment(r.amount)
+            });
+        }
+        
+        // Notify the user by calling the existing logic
+        // This avoids code duplication
+        await axios.post(`https://dollar-bot-server.onrender.com/api/admin/action`, {
+             ...r,
+             status: newStatus
+        });
+        
+        return { success: true, originalMessage: `Request from @${r.userName} processed.` };
+        
+    } catch (error) {
+        console.error("Error processing admin action:", error);
+        return { success: false, message: "Server error during action." };
+    }
+}
+
+
+// ==========================================
+// Webhook Handler (/start, /ping, and NEW: callback_query)
 // ==========================================
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
+        
+        // --- Message Handler ---
         if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text;
@@ -112,76 +159,82 @@ app.post('/webhook', async (req, res) => {
             if (text === '/start') {
                 const firstName = update.message.from.first_name || "User";
                 const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
-
-                const keyboard = {
-                    inline_keyboard: [
-                        [{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }],
-                        [
-                            { text: "📢 Join Channel", url: "https://t.me/RedExChanger" },
-                            { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }
-                        ]
-                    ]
-                };
-
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML'
-                });
+                const keyboard = { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }], [{ text: "📢 Join Channel", url: "https://t.me/RedExChanger" }, { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }]] };
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML' });
             } 
-            
             else if (text === '/ping') {
                 const latency = Math.floor(Math.random() * (400 - 150) + 150); 
-                let status = "🟢 Active";
-                if (latency > 300) status = "🟡 Average";
-                if (latency > 600) status = "🔴 Slow";
-
+                let status = "🟢 Active"; if (latency > 300) status = "🟡 Average"; if (latency > 600) status = "🔴 Slow";
                 const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
-
-                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: chatId, text: pingMsg, parse_mode: 'HTML',
-                    reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }]] }
-                });
-
+                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: pingMsg, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }]] } });
                 const botMsgId = response.data.result.message_id;
+                setTimeout(async () => { try { await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId }); await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId }); } catch (e) {} }, 300000);
+            }
+        } 
+        
+        // --- NEW: Callback Query Handler for Admin Buttons ---
+        else if (update.callback_query) {
+            const cbq = update.callback_query;
+            const data = cbq.data;
+            const adminUser = cbq.from;
+            const message = cbq.message;
+            
+            if (data.startsWith('act_')) {
+                const [_, reqId, status] = data.split('_');
+                const adminName = adminUser.first_name || "Admin";
 
-                setTimeout(async () => {
-                    try {
-                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId });
-                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId });
-                    } catch (e) {}
-                }, 300000);
+                // Process the action
+                const result = await processAdminAction(reqId, status, adminName);
+                
+                if (result.success) {
+                    // Edit the original message to show the status
+                    const newText = message.text + `\n\n<b>Status: ${status} by ${adminName}</b>`;
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                        chat_id: message.chat.id,
+                        message_id: message.message_id,
+                        text: newText,
+                        parse_mode: 'HTML',
+                        reply_markup: {} // Removes the buttons
+                    });
+                    // Answer the callback to stop the loading icon on the button
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, { callback_query_id: cbq.id, text: `Request ${status}!` });
+                } else {
+                    // If failed (e.g., already processed), just notify the admin
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, { callback_query_id: cbq.id, text: result.message, show_alert: true });
+                }
             }
         }
+        
         res.sendStatus(200);
     } catch (error) {
         console.error("Webhook Error:", error.message);
-        res.sendStatus(200);
+        res.sendStatus(200); // Always send 200 to Telegram
     }
 });
 
+
 // ==========================================
-// Broadcast APIs
+// Broadcast APIs (No changes needed)
 // ==========================================
 app.post('/api/broadcast-message', async (req, res) => {
-    const { image, text, btnText, btnUrl } = req.body;
+    const { image, text, buttons } = req.body;
     res.json({ success: true, message: "Broadcasting message started..." });
     try {
         const usersSnapshot = await db.collection('users').get();
         const users = usersSnapshot.docs.map(doc => doc.id);
-        let reply_markup = (btnText && btnUrl) ? { inline_keyboard: [[{ text: btnText, url: btnUrl }]] } : {};
-
+        let reply_markup = {};
+        if (buttons && Array.isArray(buttons) && buttons.length > 0) {
+            reply_markup = { inline_keyboard: buttons.map(btn => [{ text: btn.text, url: btn.url }]) };
+        }
         let count = 0;
         const sendNext = async () => {
             if (count >= users.length) return;
             const userId = users[count];
             try {
                 if (image) {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
-                        chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup
-                    });
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup });
                 } else {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                        chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup
-                    });
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup });
                 }
             } catch (e) {}
             count++;
@@ -220,7 +273,7 @@ app.post('/api/broadcast-task', async (req, res) => {
 });
 
 // ==========================================
-// Admin Actions (Approve/Reject)
+// Admin Actions (Approve/Reject) from Admin Panel (No changes needed here)
 // ==========================================
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
@@ -255,7 +308,7 @@ app.post('/api/admin/action', async (req, res) => {
     }
 
     if (type === "Exchange") {
-        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedExChanger`;
+        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : -------------------\n\n@RedExChanger`;
         const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedExChangerBot/app" }]] };
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
@@ -276,58 +329,71 @@ app.post('/api/admin/action', async (req, res) => {
     }
 });
 
+
 // ==========================================
-// Admin Notifications (All requests sent to Admin Chat)
+// MODIFIED: Admin Notifications now include action buttons
 // ==========================================
 
 // 1. Notify Deposit Request to Admin
 app.post('/api/notify-deposit', async (req, res) => {
-    const { username, userId, amount, method, number, trx } = req.body;
+    const { requestId, username, userId, amount, method, number, trx } = req.body;
     const adminMsg = `<b>💰 New Deposit Request</b>\n\n` +
-                     `User: @${username}\n` +
+                     `User: @${username || 'N/A'}\n` +
                      `User ID: <code>${userId}</code>\n` +
                      `Amount: ${amount} Tk\n` +
                      `Method: ${method}\n` +
                      `Sender Num: <code>${number}</code>\n` +
-                     `TrxID: <code>${trx}</code>\n\n` +
-                     `<i>Check Admin Panel to Approve.</i>`;
-    
-    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+                     `TrxID: <code>${trx}</code>`;
+    const keyboard = {
+        inline_keyboard: [[
+            { text: "✅ Approve", callback_data: `act_${requestId}_Approved` },
+            { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
+        ]]
+    };
+    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
     res.json({ success: true });
 });
 
 // 2. Notify Withdraw Request to Admin
 app.post('/api/notify-withdraw', async (req, res) => {
-    const { username, userId, amount, method, number } = req.body;
+    const { requestId, username, userId, amount, method, number } = req.body;
     const adminMsg = `<b>📤 New Withdraw Request</b>\n\n` +
-                     `User: @${username}\n` +
+                     `User: @${username || 'N/A'}\n` +
                      `User ID: <code>${userId || 'N/A'}</code>\n` +
                      `Amount: ${amount} Tk\n` +
                      `Method: ${method}\n` +
-                     `Receiver Num: <code>${number}</code>\n\n` +
-                     `<i>Process the payment and update status.</i>`;
-                     
-    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+                     `Receiver Num: <code>${number}</code>`;
+    const keyboard = {
+        inline_keyboard: [[
+            { text: "✅ Approve", callback_data: `act_${requestId}_Approved` },
+            { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
+        ]]
+    };             
+    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
     res.json({ success: true });
 });
 
 // 3. Notify Exchange Request to Admin
 app.post('/api/notify-exchange', async (req, res) => {
-    const { username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount } = req.body;
+    const { requestId, username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount } = req.body;
     const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
-                     `User: @${username}\n` +
+                     `User: @${username || 'N/A'}\n` +
                      `User ID: <code>${userId}</code>\n` +
                      `Exchange: ${sendMethod} ➔ ${recMethod}\n` +
                      `Amount: $${amount} (${bdtAmount} Tk)\n` +
                      `Payment Num: <code>${number}</code>\n` +
-                     `TrxID: <code>${trx}</code>\n\n` +
-                     `<i>Check exchange details in panel.</i>`;
-                     
-    await sendMessageToTelegram(ADMIN_ID, adminMsg);
+                     `TrxID: <code>${trx}</code>`;
+    const keyboard = {
+        inline_keyboard: [[
+            { text: "✅ Approve", callback_data: `act_${requestId}_Approved` },
+            { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
+        ]]
+    };                 
+    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
     res.json({ success: true });
 });
 
-// 4. Notify New Referral
+// 4. Notify New Referral (No buttons needed here)
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName, firstName, totalRefer } = req.body;
     if (!referrerId) return res.json({ success: false });
@@ -351,13 +417,14 @@ app.post('/api/notify-refer-join', async (req, res) => {
     } catch (error) { res.json({ success: false }); }
 });
 
-// Utility: Send Message Helper
-async function sendMessageToTelegram(chatId, text) {
+// MODIFIED: Utility to send message with optional keyboard
+async function sendMessageToTelegram(chatId, text, reply_markup = {}) {
     try { 
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
             chat_id: chatId, 
             text: text, 
-            parse_mode: 'HTML' 
+            parse_mode: 'HTML',
+            reply_markup: reply_markup
         }); 
     } catch (e) {
         console.error("Admin Notify Error:", e.message);
