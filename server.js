@@ -11,6 +11,7 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN; 
+// MODIFIED: Make sure your .env has ADMIN_ID=7767338426
 const ADMIN_ID = process.env.ADMIN_ID || '7767338426'; 
 
 // Firebase Admin Setup
@@ -158,31 +159,20 @@ app.post('/webhook', async (req, res) => {
             if (text === '/start') {
                 const firstName = update.message.from.first_name || "User";
                 const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
-
-                // MODIFIED: Changed the top button from 'url' to 'web_app' for a true Mini App experience.
-                const keyboard = {
-                    inline_keyboard: [
-                        [{ text: "🚀 Open App", web_app: { url: "https://t.me/RedExChangerBot/app" } }],
-                        [
-                            { text: "📢 Join Channel", url: "https://t.me/RedExChanger" },
-                            { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }
-                        ]
-                    ]
-                };
-
+                const keyboard = { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }], [{ text: "📢 Join Channel", url: "https://t.me/RedExChanger" }, { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }]] };
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML' });
             } 
             else if (text === '/ping') {
                 const latency = Math.floor(Math.random() * (400 - 150) + 150); 
                 let status = "🟢 Active"; if (latency > 300) status = "🟡 Average"; if (latency > 600) status = "🔴 Slow";
                 const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
-                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: pingMsg, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", web_app: { url: "https://t.me/RedExChangerBot/app" } }]] } });
+                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: pingMsg, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }]] } });
                 const botMsgId = response.data.result.message_id;
                 setTimeout(async () => { try { await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId }); await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId }); } catch (e) {} }, 300000);
             }
         } 
         
-        // --- Callback Query Handler for Admin Buttons ---
+        // --- NEW: Callback Query Handler for Admin Buttons ---
         else if (update.callback_query) {
             const cbq = update.callback_query;
             const data = cbq.data;
@@ -318,7 +308,7 @@ app.post('/api/admin/action', async (req, res) => {
     }
 
     if (type === "Exchange") {
-        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : <code>${trxId}</code>\n\n@RedExChanger`;
+        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : -------------------\n\n@RedExChanger`;
         const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedExChangerBot/app" }]] };
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
@@ -341,7 +331,7 @@ app.post('/api/admin/action', async (req, res) => {
 
 
 // ==========================================
-// Admin Notifications now include action buttons
+// MODIFIED: Admin Notifications now include action buttons
 // ==========================================
 
 // 1. Notify Deposit Request to Admin
@@ -427,7 +417,7 @@ app.post('/api/notify-refer-join', async (req, res) => {
     } catch (error) { res.json({ success: false }); }
 });
 
-// Utility to send message with optional keyboard
+// MODIFIED: Utility to send message with optional keyboard
 async function sendMessageToTelegram(chatId, text, reply_markup = {}) {
     try { 
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
