@@ -1,4 +1,4 @@
-// server.js - Final Fixed Version with Admin Notifications
+// server.js - Updated Version with 10% Commission, My Refer API & Image Support
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -11,7 +11,6 @@ app.use(cors());
 
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN; 
-// MODIFIED: Make sure your .env has ADMIN_ID=7767338426
 const ADMIN_ID = process.env.ADMIN_ID || '7767338426'; 
 
 // Firebase Admin Setup
@@ -33,11 +32,9 @@ if (process.env.FIREBASE_KEY) {
 }
 const db = admin.firestore();
 
-// 1. চ্যানেল টাস্ক ভেরিফিকেশন (No changes needed)
+// 1. চ্যানেল টাস্ক ভেরিফিকেশন
 app.post('/api/verify-channel-task', async (req, res) => {
     const { userId, taskId } = req.body;
-    console.log(`Checking Task: ${taskId} for User: ${userId}`);
-
     try {
         const taskRef = db.collection('tasks').doc(taskId);
         const taskSnap = await taskRef.get();
@@ -75,7 +72,6 @@ app.post('/api/verify-channel-task', async (req, res) => {
         }
 
     } catch (error) {
-        console.error("Verify Error:", error.response ? error.response.data : error.message);
         if (error.response && error.response.data.description.includes("chat not found")) {
              return res.json({ success: false, message: "Bot not Admin or Invalid Link" });
         }
@@ -83,7 +79,7 @@ app.post('/api/verify-channel-task', async (req, res) => {
     }
 });
 
-// 2. অ্যাপ ওপেন মেম্বারশিপ চেক (No changes needed)
+// 2. অ্যাপ ওপেন মেম্বারশিপ চেক
 app.post('/api/verify-member', async (req, res) => {
     const { userId, channelUsername } = req.body;
     try {
@@ -99,9 +95,7 @@ app.post('/api/verify-member', async (req, res) => {
 });
 
 
-// ==========================================
-// NEW: Helper function to process admin actions from bot
-// ==========================================
+// Helper function to process admin actions from bot
 async function processAdminAction(reqId, newStatus, adminName) {
     try {
         const reqRef = db.collection('requests').doc(reqId);
@@ -112,23 +106,18 @@ async function processAdminAction(reqId, newStatus, adminName) {
         
         const r = reqSnap.data();
         
-        // Prevent re-processing
         if (r.status !== 'Pending') {
             return { success: false, message: `Request already ${r.status}.` };
         }
         
-        // Update Firestore
         await reqRef.update({ status: newStatus });
         
-        // Handle rejected withdrawal (refund user)
         if (r.type === "Withdraw" && newStatus === "Rejected") {
             await db.collection('users').doc(r.userId).update({
                 mainBalance: admin.firestore.FieldValue.increment(r.amount)
             });
         }
         
-        // Notify the user by calling the existing logic
-        // This avoids code duplication
         await axios.post(`https://dollar-bot-server.onrender.com/api/admin/action`, {
              ...r,
              status: newStatus
@@ -143,14 +132,11 @@ async function processAdminAction(reqId, newStatus, adminName) {
 }
 
 
-// ==========================================
-// Webhook Handler (/start, /ping, and NEW: callback_query)
-// ==========================================
+// Webhook Handler (/start, /ping, callback_query)
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
         
-        // --- Message Handler ---
         if (update.message && update.message.text) {
             const chatId = update.message.chat.id;
             const text = update.message.text;
@@ -172,7 +158,6 @@ app.post('/webhook', async (req, res) => {
             }
         } 
         
-        // --- NEW: Callback Query Handler for Admin Buttons ---
         else if (update.callback_query) {
             const cbq = update.callback_query;
             const data = cbq.data;
@@ -183,39 +168,33 @@ app.post('/webhook', async (req, res) => {
                 const [_, reqId, status] = data.split('_');
                 const adminName = adminUser.first_name || "Admin";
 
-                // Process the action
                 const result = await processAdminAction(reqId, status, adminName);
                 
                 if (result.success) {
-                    // Edit the original message to show the status
-                    const newText = message.text + `\n\n<b>Status: ${status} by ${adminName}</b>`;
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
-                        chat_id: message.chat.id,
-                        message_id: message.message_id,
-                        text: newText,
-                        parse_mode: 'HTML',
-                        reply_markup: {} // Removes the buttons
-                    });
-                    // Answer the callback to stop the loading icon on the button
+                    const newText = message.caption ? message.caption + `\n\n<b>Status: ${status} by ${adminName}</b>` : message.text + `\n\n<b>Status: ${status} by ${adminName}</b>`;
+                    
+                    if(message.photo) {
+                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageCaption`, {
+                            chat_id: message.chat.id, message_id: message.message_id, caption: newText, parse_mode: 'HTML', reply_markup: {} 
+                        });
+                    } else {
+                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                            chat_id: message.chat.id, message_id: message.message_id, text: newText, parse_mode: 'HTML', reply_markup: {} 
+                        });
+                    }
+                    
                     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, { callback_query_id: cbq.id, text: `Request ${status}!` });
                 } else {
-                    // If failed (e.g., already processed), just notify the admin
                     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, { callback_query_id: cbq.id, text: result.message, show_alert: true });
                 }
             }
         }
-        
         res.sendStatus(200);
-    } catch (error) {
-        console.error("Webhook Error:", error.message);
-        res.sendStatus(200); // Always send 200 to Telegram
-    }
+    } catch (error) { res.sendStatus(200); }
 });
 
 
-// ==========================================
-// Broadcast APIs (No changes needed)
-// ==========================================
+// Broadcast APIs
 app.post('/api/broadcast-message', async (req, res) => {
     const { image, text, buttons } = req.body;
     res.json({ success: true, message: "Broadcasting message started..." });
@@ -272,9 +251,7 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// ==========================================
-// Admin Actions (Approve/Reject) from Admin Panel (No changes needed here)
-// ==========================================
+// Admin Actions (Approve/Reject)
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
@@ -282,7 +259,7 @@ app.post('/api/admin/action', async (req, res) => {
 
     if (type === "Deposit" && status === 'Approved') {
         const depositAmount = parseFloat(amount);
-        const commissionRate = 0.015;
+        const commissionRate = 0.10; // UPDATED: 10% Commission
         const commission = depositAmount * commissionRate;
         const userFinalAmount = depositAmount - commission;
 
@@ -295,10 +272,10 @@ app.post('/api/admin/action', async (req, res) => {
                     mainBalance: admin.firestore.FieldValue.increment(commission),
                     refEarnings: admin.firestore.FieldValue.increment(commission)
                 });
-                const refMsg = `New Deposit Commission Added 💰\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(1.5% from Deposit)</blockquote>`;
+                const refMsg = `<b>New Deposit Commission Added 💰</b>\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(10% from Deposit)</blockquote>`;
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
-            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (1.5%): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
+            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (10% Refer): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                 chat_id: userId, text: userMsg, parse_mode: 'HTML',
                 reply_markup: { inline_keyboard: [[{ text: "Check Wallet 💰", url: "https://t.me/RedExChangerBot/app" }]] }
@@ -312,12 +289,17 @@ app.post('/api/admin/action', async (req, res) => {
         const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedExChangerBot/app" }]] };
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
+            
+            // UPDATED: 10% Commission for Exchange
             if (status === 'Approved' && referrerId && bdtAmount) {
-                const exCommission = (parseFloat(bdtAmount) * 0.015).toFixed(2);
+                const exCommission = (parseFloat(bdtAmount) * 0.10).toFixed(2);
                 await db.collection('users').doc(String(referrerId)).update({
                     mainBalance: admin.firestore.FieldValue.increment(parseFloat(exCommission)),
                     refEarnings: admin.firestore.FieldValue.increment(parseFloat(exCommission))
                 });
+                
+                const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${exCommission} ৳\n<blockquote>(10% from Exchange)</blockquote>`;
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
             res.json({ success: true });
         } catch (error) { res.json({ success: false }); }
@@ -330,13 +312,9 @@ app.post('/api/admin/action', async (req, res) => {
 });
 
 
-// ==========================================
-// MODIFIED: Admin Notifications now include action buttons
-// ==========================================
-
-// 1. Notify Deposit Request to Admin
+// Admin Notifications (UPDATED WITH IMAGE SUPPORT)
 app.post('/api/notify-deposit', async (req, res) => {
-    const { requestId, username, userId, amount, method, number, trx } = req.body;
+    const { requestId, username, userId, amount, method, number, trx, imageUrl } = req.body;
     const adminMsg = `<b>💰 New Deposit Request</b>\n\n` +
                      `User: @${username || 'N/A'}\n` +
                      `User ID: <code>${userId}</code>\n` +
@@ -350,11 +328,10 @@ app.post('/api/notify-deposit', async (req, res) => {
             { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
         ]]
     };
-    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
+    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
     res.json({ success: true });
 });
 
-// 2. Notify Withdraw Request to Admin
 app.post('/api/notify-withdraw', async (req, res) => {
     const { requestId, username, userId, amount, method, number } = req.body;
     const adminMsg = `<b>📤 New Withdraw Request</b>\n\n` +
@@ -373,9 +350,8 @@ app.post('/api/notify-withdraw', async (req, res) => {
     res.json({ success: true });
 });
 
-// 3. Notify Exchange Request to Admin
 app.post('/api/notify-exchange', async (req, res) => {
-    const { requestId, username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount } = req.body;
+    const { requestId, username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount, imageUrl } = req.body;
     const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
                      `User: @${username || 'N/A'}\n` +
                      `User ID: <code>${userId}</code>\n` +
@@ -389,27 +365,30 @@ app.post('/api/notify-exchange', async (req, res) => {
             { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
         ]]
     };                 
-    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
+    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
     res.json({ success: true });
 });
 
-// 4. Notify New Referral (No buttons needed here)
+// Notify New Referral (UPDATED: Actual Total Refer Count)
 app.post('/api/notify-refer-join', async (req, res) => {
-    const { referrerId, newUserName, firstName, totalRefer } = req.body;
+    const { referrerId, newUserName, firstName } = req.body;
     if (!referrerId) return res.json({ success: false });
 
-    let referCount = totalRefer || 1;
-    const rawName = firstName || newUserName || "User";
-    const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-
-    const msg = `<b>🆕 New Refer Joined!</b>\n\n` +
-                `Name: ${safeName}\n` +
-                `Total Refer: ${referCount}\n\n` +
-                `<i>You will receive a 0.1% commission when the person you refer makes a deposit or exchange.</i>`;
-                
-    const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
-
     try {
+        // Find exact total refer count from database
+        const referSnap = await db.collection('users').where('referredBy', '==', String(referrerId)).get();
+        const referCount = referSnap.size || 1; 
+
+        const rawName = firstName || newUserName || "User";
+        const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+        const msg = `<b>🆕 New Refer Joined!</b>\n\n` +
+                    `Name: ${safeName}\n` +
+                    `Total Refer: ${referCount}\n\n` +
+                    `<i>You will receive a 10% commission when the person you refer makes a deposit or exchange.</i>`;
+                    
+        const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
+
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
             chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
         });
@@ -417,15 +396,50 @@ app.post('/api/notify-refer-join', async (req, res) => {
     } catch (error) { res.json({ success: false }); }
 });
 
-// MODIFIED: Utility to send message with optional keyboard
-async function sendMessageToTelegram(chatId, text, reply_markup = {}) {
+// NEW API: Get My Referrals List for index.html
+app.get('/api/my-referrals/:userId', async (req, res) => {
+    try {
+        const userId = req.params.userId;
+        const usersRef = db.collection('users');
+        const snapshot = await usersRef.where('referredBy', '==', String(userId)).get();
+        
+        let referList = [];
+        snapshot.forEach(doc => {
+            const data = doc.data();
+            referList.push({
+                name: data.firstName || data.username || "Unknown",
+                photoUrl: data.photoUrl || null, // Will use default in index.html if null
+                joinedAt: data.joinedAt || "Recently"
+            });
+        });
+        
+        res.json({ success: true, list: referList });
+    } catch (error) {
+        console.error("Fetch My Referrals Error:", error);
+        res.json({ success: false, list: [] });
+    }
+});
+
+
+// Utility to send message with optional keyboard & Image Support
+async function sendMessageToTelegram(chatId, text, reply_markup = {}, imageUrl = null) {
     try { 
-        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
-            chat_id: chatId, 
-            text: text, 
-            parse_mode: 'HTML',
-            reply_markup: reply_markup
-        }); 
+        if (imageUrl && imageUrl.startsWith('http')) {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+                chat_id: chatId,
+                photo: imageUrl,
+                caption: text,
+                parse_mode: 'HTML',
+                reply_markup: reply_markup
+            });
+        } else {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
+                chat_id: chatId, 
+                text: text, 
+                parse_mode: 'HTML',
+                reply_markup: reply_markup
+            }); 
+        }
     } catch (e) {
         console.error("Admin Notify Error:", e.message);
     }
