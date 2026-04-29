@@ -1,4 +1,3 @@
-// server.js - Updated Version with 10% Commission, My Refer API & Image Support
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
@@ -251,7 +250,7 @@ app.post('/api/broadcast-task', async (req, res) => {
     } catch (error) { console.error("Broadcast Error:", error.message); }
 });
 
-// Admin Actions (Approve/Reject)
+// Admin Actions (Approve/Reject) WITH Commission Generated Tracking
 app.post('/api/admin/action', async (req, res) => {
     const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
@@ -259,13 +258,14 @@ app.post('/api/admin/action', async (req, res) => {
 
     if (type === "Deposit" && status === 'Approved') {
         const depositAmount = parseFloat(amount);
-        const commissionRate = 0.10; // UPDATED: 10% Commission
+        const commissionRate = 0.10; // 10% Commission
         const commission = depositAmount * commissionRate;
         const userFinalAmount = depositAmount - commission;
 
         try {
             await db.collection('users').doc(String(userId)).update({
-                mainBalance: admin.firestore.FieldValue.increment(userFinalAmount)
+                mainBalance: admin.firestore.FieldValue.increment(userFinalAmount),
+                commissionGenerated: admin.firestore.FieldValue.increment(commission) // Track Commission from this user
             });
             if (referrerId) {
                 await db.collection('users').doc(String(referrerId)).update({
@@ -290,12 +290,16 @@ app.post('/api/admin/action', async (req, res) => {
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
             
-            // UPDATED: 10% Commission for Exchange
+            // 10% Commission for Exchange and Tracking
             if (status === 'Approved' && referrerId && bdtAmount) {
                 const exCommission = (parseFloat(bdtAmount) * 0.10).toFixed(2);
                 await db.collection('users').doc(String(referrerId)).update({
                     mainBalance: admin.firestore.FieldValue.increment(parseFloat(exCommission)),
                     refEarnings: admin.firestore.FieldValue.increment(parseFloat(exCommission))
+                });
+                
+                await db.collection('users').doc(String(userId)).update({
+                    commissionGenerated: admin.firestore.FieldValue.increment(parseFloat(exCommission)) // Track Commission from this user
                 });
                 
                 const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${exCommission} ৳\n<blockquote>(10% from Exchange)</blockquote>`;
@@ -312,7 +316,7 @@ app.post('/api/admin/action', async (req, res) => {
 });
 
 
-// Admin Notifications (UPDATED WITH IMAGE SUPPORT)
+// Admin Notifications 
 app.post('/api/notify-deposit', async (req, res) => {
     const { requestId, username, userId, amount, method, number, trx, imageUrl } = req.body;
     const adminMsg = `<b>💰 New Deposit Request</b>\n\n` +
@@ -369,13 +373,12 @@ app.post('/api/notify-exchange', async (req, res) => {
     res.json({ success: true });
 });
 
-// Notify New Referral (UPDATED: Actual Total Refer Count)
+// Notify New Referral
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName, firstName } = req.body;
     if (!referrerId) return res.json({ success: false });
 
     try {
-        // Find exact total refer count from database
         const referSnap = await db.collection('users').where('referredBy', '==', String(referrerId)).get();
         const referCount = referSnap.size || 1; 
 
@@ -396,24 +399,40 @@ app.post('/api/notify-refer-join', async (req, res) => {
     } catch (error) { res.json({ success: false }); }
 });
 
-// NEW API: Get My Referrals List for index.html
+// NEW API: Get My Referrals List (WITH PAGINATION AND COMMISSION)
 app.get('/api/my-referrals/:userId', async (req, res) => {
     try {
         const userId = req.params.userId;
+        const lastId = req.query.lastId;
         const usersRef = db.collection('users');
-        const snapshot = await usersRef.where('referredBy', '==', String(userId)).get();
+        
+        let q = usersRef.where('referredBy', '==', String(userId)).limit(50);
+        
+        if (lastId) {
+            const lastDoc = await usersRef.doc(lastId).get();
+            if (lastDoc.exists) {
+                q = q.startAfter(lastDoc);
+            }
+        }
+        
+        const snapshot = await q.get();
         
         let referList = [];
+        let newLastId = null;
+        
         snapshot.forEach(doc => {
             const data = doc.data();
+            newLastId = doc.id;
             referList.push({
-                name: data.firstName || data.username || "Unknown",
-                photoUrl: data.photoUrl || null, // Will use default in index.html if null
-                joinedAt: data.joinedAt || "Recently"
+                id: doc.id,
+                name: data.name || data.firstName || data.username || "Unknown",
+                photo: data.photo || data.photoUrl || null,
+                joinedAt: data.joinedAt || "Recently",
+                commission: data.commissionGenerated || 0
             });
         });
         
-        res.json({ success: true, list: referList });
+        res.json({ success: true, list: referList, lastId: newLastId, hasMore: referList.length === 50 });
     } catch (error) {
         console.error("Fetch My Referrals Error:", error);
         res.json({ success: false, list: [] });
