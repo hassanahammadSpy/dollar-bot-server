@@ -285,7 +285,22 @@ app.post('/api/admin/action', async (req, res) => {
     }
 
     if (type === "Exchange") {
-        const msg = `Your Exchange Request ${actionText}. ${icon}\n\nUsername : @${userName}\nAmount : $${amount}\nTo : ${receiveMethod}\nTrxID : -------------------\n\n@RedExChanger`;
+        let refCommission = 0;
+        let bdt = parseFloat(bdtAmount) || 0;
+        if (referrerId && bdt) {
+            refCommission = bdt * 0.10; // ১০% কমিশন হিসাব
+        }
+        let finalBdtAmount = bdt - refCommission;
+
+        const msg = `Your Exchange Request ${actionText}. ${icon}\n\n` +
+                    `Username : @${userName}\n` +
+                    `Amount : $${amount} (${bdt.toFixed(2)} ৳)\n` +
+                    `Ref Commission : -${refCommission.toFixed(2)} ৳\n` +
+                    `Received : ${finalBdtAmount.toFixed(2)} ৳\n` +
+                    `To : ${receiveMethod}\n` +
+                    `TrxID : -------------------\n\n` +
+                    `@RedExChanger`;
+                    
         const keyboard = { inline_keyboard: [[{ text: "CHECK HISTORY 📝", url: "https://t.me/RedExChangerBot/app" }]] };
         try {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
@@ -356,21 +371,41 @@ app.post('/api/notify-withdraw', async (req, res) => {
 
 app.post('/api/notify-exchange', async (req, res) => {
     const { requestId, username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount, imageUrl } = req.body;
-    const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
-                     `User: @${username || 'N/A'}\n` +
-                     `User ID: <code>${userId}</code>\n` +
-                     `Exchange: ${sendMethod} ➔ ${recMethod}\n` +
-                     `Amount: $${amount} (${bdtAmount} Tk)\n` +
-                     `Payment Num: <code>${number}</code>\n` +
-                     `TrxID: <code>${trx}</code>`;
-    const keyboard = {
-        inline_keyboard: [[
-            { text: "✅ Approve", callback_data: `act_${requestId}_Approved` },
-            { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
-        ]]
-    };                 
-    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
-    res.json({ success: true });
+    
+    try {
+        // User এর রেফার আইডি বের করা হচ্ছে
+        const userDoc = await db.collection('users').doc(String(userId)).get();
+        const referrerId = userDoc.exists ? userDoc.data().referredBy : null;
+        
+        let refCommission = 0;
+        let bdt = parseFloat(bdtAmount) || 0;
+        if (referrerId && bdt) {
+            refCommission = bdt * 0.10; // ১০% কমিশন হিসাব
+        }
+        let finalBdt = bdt - refCommission;
+
+        const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
+                         `User: @${username || 'N/A'}\n` +
+                         `User ID: <code>${userId}</code>\n` +
+                         `Exchange: ${sendMethod} ➔ ${recMethod}\n` +
+                         `Amount: $${amount} (${bdt.toFixed(2)} Tk)\n` +
+                         `Ref Commission: -${refCommission.toFixed(2)} Tk\n` +
+                         `Payable: ${finalBdt.toFixed(2)} Tk\n` +
+                         `Payment Num: <code>${number}</code>\n` +
+                         `TrxID: <code>${trx}</code>`;
+                         
+        const keyboard = {
+            inline_keyboard: [[
+                { text: "✅ Approve", callback_data: `act_${requestId}_Approved` },
+                { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
+            ]]
+        };                 
+        await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Notify Exchange Error:", error);
+        res.json({ success: false });
+    }
 });
 
 // Notify New Referral
