@@ -3,6 +3,8 @@ const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
 const admin = require('firebase-admin');
+const os = require('os');
+const { exec } = require('child_process');
 
 const app = express();
 app.use(express.json());
@@ -11,6 +13,7 @@ app.use(cors());
 // --- CONFIGURATION ---
 const BOT_TOKEN = process.env.BOT_TOKEN; 
 const ADMIN_ID = process.env.ADMIN_ID || '7767338426'; 
+const BOT_START_TIME = Date.now();
 
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
@@ -30,6 +33,30 @@ if (process.env.FIREBASE_KEY) {
     console.warn("⚠️ Warning: FIREBASE_KEY not found.");
 }
 const db = admin.firestore();
+
+// --- Helper: get exchange fee % for a given exchange method name ---
+async function getExchangeFeePercent(methodName) {
+    if (!methodName) return 0;
+    try {
+        const snap = await db.collection('exchange_methods').where('name', '==', methodName).limit(1).get();
+        if (snap.empty) return 0;
+        const fee = parseFloat(snap.docs[0].data().fee);
+        return isNaN(fee) ? 0 : fee;
+    } catch (e) {
+        console.error("getExchangeFeePercent error:", e.message);
+        return 0;
+    }
+}
+
+// --- Helper: get app settings (cached lightly per-call, simple direct read) ---
+async function getAppSettings() {
+    try {
+        const s = await db.collection('settings').doc('appConfig').get();
+        return s.exists ? s.data() : {};
+    } catch (e) {
+        return {};
+    }
+}
 
 // 1. চ্যানেল টাস্ক ভেরিফিকেশন
 app.post('/api/verify-channel-task', async (req, res) => {
@@ -130,6 +157,45 @@ async function processAdminAction(reqId, newStatus, adminName) {
     }
 }
 
+// --- Ping message builder (shared between private chat and group) ---
+async function buildPingMessage(latencyMs) {
+    const uptimeSec = Math.floor(process.uptime());
+    const days = Math.floor(uptimeSec / 86400);
+    const hours = Math.floor((uptimeSec % 86400) / 3600);
+    const mins = Math.floor((uptimeSec % 3600) / 60);
+    const secs = uptimeSec % 60;
+    const uptimeStr = `${days}d ${String(hours).padStart(2,'0')}h ${String(mins).padStart(2,'0')}m ${String(secs).padStart(2,'0')}s`;
+
+    // CPU load (approx, based on 1-minute load average vs core count)
+    const cpuCount = os.cpus().length || 1;
+    const load1 = os.loadavg()[0];
+    const cpuPercent = Math.min(100, (load1 / cpuCount) * 100).toFixed(2);
+
+    // RAM usage
+    const totalMemGB = os.totalmem() / (1024 ** 3);
+    const freeMemGB = os.freemem() / (1024 ** 3);
+    const usedMemGB = totalMemGB - freeMemGB;
+
+    // Disk space via `df` (Linux). Falls back to 0.00/0.00 if unavailable (e.g. on Windows or restricted hosts).
+    const diskInfo = await new Promise((resolve) => {
+        exec("df -k / | tail -1 | awk '{print $2, $3}'", (err, stdout) => {
+            if (err || !stdout) return resolve({ usedGB: 0, totalGB: 0 });
+            const parts = stdout.trim().split(/\s+/).map(Number);
+            const totalGB = (parts[0] || 0) / (1024 * 1024);
+            const usedGB = (parts[1] || 0) / (1024 * 1024);
+            resolve({ usedGB, totalGB });
+        });
+    });
+
+    return `ᴘᴏɴɢ! — ${latencyMs} ms\n\n` +
+        `ꜱʏꜱᴛᴇᴍ ꜱᴛᴀᴛᴜꜱ\n` +
+        `─────────────────────\n` +
+        `• ᴜᴘᴛɪᴍᴇ: ${uptimeStr}\n` +
+        `• ᴄᴘᴜ ʟᴏᴀᴅ: ${cpuPercent}%\n` +
+        `• ʀᴀᴍ ᴜꜱᴀɢᴇ: ${usedMemGB.toFixed(2)} / ${totalMemGB.toFixed(2)} GB\n` +
+        `• ᴅɪꜱᴋ ꜱᴘᴀᴄᴇ: ${diskInfo.usedGB.toFixed(2)} / ${diskInfo.totalGB.toFixed(2)} GB\n` +
+        `─────────────────────`;
+}
 
 // Webhook Handler (/start, /ping, callback_query)
 app.post('/webhook', async (req, res) => {
@@ -140,20 +206,42 @@ app.post('/webhook', async (req, res) => {
             const chatId = update.message.chat.id;
             const text = update.message.text;
             const messageId = update.message.message_id;
+            // Support "/ping@YourBotUsername" style commands used in groups
+            const command = text.split('@')[0].split(' ')[0];
 
-            if (text === '/start') {
+            if (command === '/start') {
                 const firstName = update.message.from.first_name || "User";
                 const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
                 const keyboard = { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }], [{ text: "📢 Join Channel", url: "https://t.me/RedExChanger" }, { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }]] };
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML' });
             } 
-            else if (text === '/ping') {
-                const latency = Math.floor(Math.random() * (400 - 150) + 150); 
-                let status = "🟢 Active"; if (latency > 300) status = "🟡 Average"; if (latency > 600) status = "🔴 Slow";
-                const pingMsg = `🏓 Pong!\n\n🧭 Ping: ${latency} ms\n\n📶 Status: ${status}\n\n📝 Note: This ping mainly shows bot/server response time. In some cases, Telegram API processing delay may increase the value.\n🗑 This message and your command will be deleted after 5 minutes.`;
-                const response = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: pingMsg, parse_mode: 'HTML', reply_markup: { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }]] } });
-                const botMsgId = response.data.result.message_id;
-                setTimeout(async () => { try { await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId }); await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId }); } catch (e) {} }, 300000);
+            else if (command === '/ping') {
+                // Note: Telegram inline buttons cannot be given a custom color via the Bot API —
+                // button color is controlled by the Telegram client itself, not by bots.
+                const t0 = Date.now();
+                const pingKeyboard = { inline_keyboard: [[{ text: "🛠 Support", url: "https://t.me/RedExSupportBot" }]] };
+
+                // Send a lightweight placeholder first so we can measure real round-trip latency,
+                // then edit it with the final stats message.
+                const sent = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                    chat_id: chatId, text: "Pinging...", reply_to_message_id: messageId
+                });
+                const latency = Date.now() - t0;
+                const botMsgId = sent.data.result.message_id;
+                const pingMsg = await buildPingMessage(latency);
+
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/editMessageText`, {
+                    chat_id: chatId, message_id: botMsgId, text: pingMsg, reply_markup: pingKeyboard
+                });
+
+                // Auto-delete both messages after 5 minutes (works the same in private chats and groups,
+                // as long as the bot has delete-message rights in that group).
+                setTimeout(async () => {
+                    try {
+                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: botMsgId });
+                        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId });
+                    } catch (e) {}
+                }, 300000);
             }
         } 
         
@@ -195,7 +283,7 @@ app.post('/webhook', async (req, res) => {
 
 // Broadcast APIs
 app.post('/api/broadcast-message', async (req, res) => {
-    const { image, text, buttons } = req.body;
+    const { image, text, buttons, pinAll } = req.body;
     res.json({ success: true, message: "Broadcasting message started..." });
     try {
         const usersSnapshot = await db.collection('users').get();
@@ -209,10 +297,17 @@ app.post('/api/broadcast-message', async (req, res) => {
             if (count >= users.length) return;
             const userId = users[count];
             try {
+                let sentMsg;
                 if (image) {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup });
+                    sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup });
                 } else {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup });
+                    sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup });
+                }
+                // Pin All User option: pin the just-sent broadcast message in each user's private chat with the bot
+                if (pinAll && sentMsg && sentMsg.data && sentMsg.data.result) {
+                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+                        chat_id: userId, message_id: sentMsg.data.result.message_id, disable_notification: true
+                    }).catch(() => {}); // ignore if user blocked bot or pin not allowed
                 }
             } catch (e) {}
             count++;
@@ -252,7 +347,7 @@ app.post('/api/broadcast-task', async (req, res) => {
 
 // Admin Actions (Approve/Reject) WITH Commission Generated Tracking
 app.post('/api/admin/action', async (req, res) => {
-    const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
+    const { userId, userName, amount, bdtAmount, receiveMethod = 'N/A', sendMethod = 'N/A', userNumber = 'N/A', trxId = 'N/A', status, type, referrerId } = req.body;
     const icon = status === 'Approved' ? '✅' : '❎';
     const actionText = status === 'Approved' ? 'Approved' : 'Rejected';
 
@@ -285,16 +380,23 @@ app.post('/api/admin/action', async (req, res) => {
     }
 
     if (type === "Exchange") {
-        let refCommission = 0;
+        // Exchange fee (set per Exchange Method in Admin Panel) is deducted first,
+        // then referral commission (10%) is taken from what remains.
         let bdt = parseFloat(bdtAmount) || 0;
-        if (referrerId && bdt) {
-            refCommission = bdt * 0.10; // ১০% কমিশন হিসাব
+        const feePercent = await getExchangeFeePercent(sendMethod);
+        const exchangeFeeAmount = bdt * (feePercent / 100);
+        const afterFee = bdt - exchangeFeeAmount;
+
+        let refCommission = 0;
+        if (referrerId && afterFee) {
+            refCommission = afterFee * 0.10; // ১০% কমিশন হিসাব (fee কাটার পরে remaining amount থেকে)
         }
-        let finalBdtAmount = bdt - refCommission;
+        let finalBdtAmount = afterFee - refCommission;
 
         const msg = `Your Exchange Request ${actionText}. ${icon}\n\n` +
                     `Username : @${userName}\n` +
                     `Amount : $${amount} (${bdt.toFixed(2)} ৳)\n` +
+                    `Exchange Fee (${feePercent}%) : -${exchangeFeeAmount.toFixed(2)} ৳\n` +
                     `Ref Commission : -${refCommission.toFixed(2)} ৳\n` +
                     `Received : ${finalBdtAmount.toFixed(2)} ৳\n` +
                     `To : ${receiveMethod}\n` +
@@ -306,18 +408,17 @@ app.post('/api/admin/action', async (req, res) => {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard });
             
             // 10% Commission for Exchange and Tracking
-            if (status === 'Approved' && referrerId && bdtAmount) {
-                const exCommission = (parseFloat(bdtAmount) * 0.10).toFixed(2);
+            if (status === 'Approved' && referrerId && refCommission > 0) {
                 await db.collection('users').doc(String(referrerId)).update({
-                    mainBalance: admin.firestore.FieldValue.increment(parseFloat(exCommission)),
-                    refEarnings: admin.firestore.FieldValue.increment(parseFloat(exCommission))
+                    mainBalance: admin.firestore.FieldValue.increment(refCommission),
+                    refEarnings: admin.firestore.FieldValue.increment(refCommission)
                 });
                 
                 await db.collection('users').doc(String(userId)).update({
-                    commissionGenerated: admin.firestore.FieldValue.increment(parseFloat(exCommission)) // Track Commission from this user
+                    commissionGenerated: admin.firestore.FieldValue.increment(refCommission) // Track Commission from this user
                 });
                 
-                const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${exCommission} ৳\n<blockquote>(10% from Exchange)</blockquote>`;
+                const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${refCommission.toFixed(2)} ৳\n<blockquote>(10% from Exchange)</blockquote>`;
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
             res.json({ success: true });
@@ -370,25 +471,31 @@ app.post('/api/notify-withdraw', async (req, res) => {
 });
 
 app.post('/api/notify-exchange', async (req, res) => {
-    const { requestId, username, userId, sendMethod, recMethod, number, trx, amount, bdtAmount, imageUrl } = req.body;
+    const { requestId, username, firstName, userId, sendMethod, recMethod, number, trx, amount, bdtAmount, imageUrl } = req.body;
     
     try {
         // User এর রেফার আইডি বের করা হচ্ছে
         const userDoc = await db.collection('users').doc(String(userId)).get();
         const referrerId = userDoc.exists ? userDoc.data().referredBy : null;
-        
-        let refCommission = 0;
-        let bdt = parseFloat(bdtAmount) || 0;
-        if (referrerId && bdt) {
-            refCommission = bdt * 0.10; // ১০% কমিশন হিসাব
-        }
-        let finalBdt = bdt - refCommission;
 
+        const feePercent = await getExchangeFeePercent(sendMethod);
+        let bdt = parseFloat(bdtAmount) || 0;
+        const exchangeFeeAmount = bdt * (feePercent / 100);
+        const afterFee = bdt - exchangeFeeAmount;
+
+        let refCommission = 0;
+        if (referrerId && afterFee) {
+            refCommission = afterFee * 0.10; // ১০% কমিশন হিসাব (fee কাটার পরে)
+        }
+        let finalBdt = afterFee - refCommission;
+
+        // ---- Admin notification (Approve/Reject buttons) - unchanged behaviour ----
         const adminMsg = `<b>🔄 New Exchange Request</b>\n\n` +
                          `User: @${username || 'N/A'}\n` +
                          `User ID: <code>${userId}</code>\n` +
                          `Exchange: ${sendMethod} ➔ ${recMethod}\n` +
                          `Amount: $${amount} (${bdt.toFixed(2)} Tk)\n` +
+                         `Exchange Fee (${feePercent}%): -${exchangeFeeAmount.toFixed(2)} Tk\n` +
                          `Ref Commission: -${refCommission.toFixed(2)} Tk\n` +
                          `Payable: ${finalBdt.toFixed(2)} Tk\n` +
                          `Payment Num: <code>${number}</code>\n` +
@@ -401,6 +508,26 @@ app.post('/api/notify-exchange', async (req, res) => {
             ]]
         };                 
         await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
+
+        // ---- Public Notification Channel/Group (set from Admin Panel Settings) ----
+        // Note: Telegram inline buttons cannot be colored via the Bot API — the "Let's Exchange Now"
+        // button will use Telegram's default button style, not a custom red color.
+        const settings = await getAppSettings();
+        const notifyChatId = settings.notifyChatId;
+        if (notifyChatId) {
+            const groupMsg = `<b>🚨 New Exchange Request</b>\n\n` +
+                `Name → <code>${firstName || username || 'User'}</code>\n` +
+                `Amount → <code>$${amount}</code>\n` +
+                `Pay Amount → <code>${finalBdt.toFixed(2)}৳</code>\n` +
+                `Exchange fee → <code>${feePercent}%</code>\n` +
+                `Ref Commission → <code>${refCommission.toFixed(2)}৳</code>\n` +
+                `Exchange Method → <code>${sendMethod}</code>\n` +
+                `Payment Method → <code>${recMethod}</code>\n\n` +
+                `<blockquote>এখন খুচরো ডলার বিক্রি করুন সহজে পেমেন্ট নিন বিকাশ/নগদ এ।</blockquote>`;
+            const groupKeyboard = { inline_keyboard: [[{ text: "Let's Exchange Now", url: "https://t.me/RedExChangerBot/app?startapp" }]] };
+            await sendMessageToTelegram(notifyChatId, groupMsg, groupKeyboard).catch(e => {});
+        }
+
         res.json({ success: true });
     } catch (error) {
         console.error("Notify Exchange Error:", error);
