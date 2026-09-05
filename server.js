@@ -58,6 +58,53 @@ async function getAppSettings() {
     }
 }
 
+// --- Helper: parse a t.me post link into {chatId, messageId} for forwardMessage ---
+// Supports public posts: https://t.me/<username>/<msgId>
+// And private channel/group posts (bot must be a member): https://t.me/c/<internalId>/<msgId>
+function parseTelegramPostLink(link) {
+    if (!link) return null;
+    try {
+        const url = new URL(link.trim());
+        if (!url.hostname.includes('t.me')) return null;
+        const parts = url.pathname.split('/').filter(Boolean);
+        if (parts[0] === 'c' && parts.length >= 3) {
+            const internalId = parts[1];
+            const msgId = parseInt(parts[2], 10);
+            if (!internalId || !msgId) return null;
+            return { chatId: `-100${internalId}`, messageId: msgId };
+        } else if (parts.length >= 2) {
+            const username = parts[0];
+            const msgId = parseInt(parts[1], 10);
+            if (!username || !msgId) return null;
+            return { chatId: `@${username}`, messageId: msgId };
+        }
+        return null;
+    } catch (e) {
+        return null;
+    }
+}
+
+// --- Helper: send something to every user in Firestore with limited concurrency,
+// batching requests to stay under Telegram's ~30 messages/second global rate limit,
+// and reporting live progress back into a broadcast_history document. ---
+async function broadcastToAllUsers(sendOneFn, historyRef) {
+    const usersSnapshot = await db.collection('users').get();
+    const users = usersSnapshot.docs.map(d => d.id);
+    const BATCH_SIZE = 25;
+    let success = 0, fail = 0;
+
+    for (let i = 0; i < users.length; i += BATCH_SIZE) {
+        const batch = users.slice(i, i + BATCH_SIZE);
+        const results = await Promise.all(batch.map(uid => sendOneFn(uid).catch(() => false)));
+        results.forEach(ok => ok ? success++ : fail++);
+        if (historyRef) {
+            await historyRef.update({ successCount: success, failCount: fail, total: users.length }).catch(() => {});
+        }
+        if (i + BATCH_SIZE < users.length) await new Promise(r => setTimeout(r, 1000));
+    }
+    return { success, fail, total: users.length };
+}
+
 // 1. চ্যানেল টাস্ক ভেরিফিকেশন
 app.post('/api/verify-channel-task', async (req, res) => {
     const { userId, taskId } = req.body;
@@ -284,37 +331,88 @@ app.post('/webhook', async (req, res) => {
 // Broadcast APIs
 app.post('/api/broadcast-message', async (req, res) => {
     const { image, text, buttons, pinAll } = req.body;
-    res.json({ success: true, message: "Broadcasting message started..." });
+
+    // Build & validate inline keyboard. A malformed url (missing http/https) makes Telegram
+    // reject the WHOLE sendMessage/sendPhoto call, which is why buttons could silently vanish
+    // (the failed call was being swallowed by an empty catch). We validate up front instead.
+    let reply_markup = undefined;
+    const validButtons = (Array.isArray(buttons) ? buttons : []).filter(b => b && b.text && b.url && /^https?:\/\//i.test(String(b.url).trim()));
+    if (validButtons.length > 0) {
+        reply_markup = { inline_keyboard: validButtons.map(b => [{ text: b.text, url: b.url.trim() }]) };
+    }
+
+    // Create the history record up-front (server-side) so it always reflects real, live progress
+    // instead of a hardcoded 0/0 written once from the client.
+    let historyRef = null;
     try {
-        const usersSnapshot = await db.collection('users').get();
-        const users = usersSnapshot.docs.map(doc => doc.id);
-        let reply_markup = {};
-        if (buttons && Array.isArray(buttons) && buttons.length > 0) {
-            reply_markup = { inline_keyboard: buttons.map(btn => [{ text: btn.text, url: btn.url }]) };
+        historyRef = await db.collection('broadcast_history').add({
+            type: 'message', text: text || '', image: image || '', buttons: validButtons, pinAll: !!pinAll,
+            successCount: 0, failCount: 0, total: 0, status: 'sending', createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+    } catch (e) { console.error("History create error:", e.message); }
+
+    res.json({ success: true, message: "Broadcasting message started...", historyId: historyRef ? historyRef.id : null });
+
+    const sendOne = async (userId) => {
+        let sentMsg;
+        if (image) {
+            sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup });
+        } else {
+            sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup });
         }
-        let count = 0;
-        const sendNext = async () => {
-            if (count >= users.length) return;
-            const userId = users[count];
-            try {
-                let sentMsg;
-                if (image) {
-                    sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: reply_markup });
-                } else {
-                    sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: reply_markup });
-                }
-                // Pin All User option: pin the just-sent broadcast message in each user's private chat with the bot
-                if (pinAll && sentMsg && sentMsg.data && sentMsg.data.result) {
-                    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
-                        chat_id: userId, message_id: sentMsg.data.result.message_id, disable_notification: true
-                    }).catch(() => {}); // ignore if user blocked bot or pin not allowed
-                }
-            } catch (e) {}
-            count++;
-            setTimeout(sendNext, 50);
-        };
-        sendNext();
-    } catch (error) { console.error("Broadcast Msg Error:", error.message); }
+        if (pinAll && sentMsg && sentMsg.data && sentMsg.data.result) {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+                chat_id: userId, message_id: sentMsg.data.result.message_id, disable_notification: true
+            }).catch(() => {}); // ignore if user blocked bot or pin not allowed — the message itself still counts as sent
+        }
+        return true;
+    };
+
+    try {
+        await broadcastToAllUsers(sendOne, historyRef);
+        if (historyRef) await historyRef.update({ status: 'done' }).catch(() => {});
+    } catch (error) {
+        console.error("Broadcast Msg Error:", error.message);
+        if (historyRef) await historyRef.update({ status: 'error' }).catch(() => {});
+    }
+});
+
+// Forward a public/private channel or group post to every user (bot must be a member/admin
+// of the source chat to read it; for private chats use the https://t.me/c/<id>/<msgId> link format).
+app.post('/api/broadcast-forward', async (req, res) => {
+    const { postLink, pinAll } = req.body;
+    const parsed = parseTelegramPostLink(postLink);
+    if (!parsed) return res.json({ success: false, message: "Invalid Telegram post link. Use https://t.me/channel/123 or https://t.me/c/1234567890/123" });
+
+    let historyRef = null;
+    try {
+        historyRef = await db.collection('broadcast_history').add({
+            type: 'forward', postLink, fromChatId: parsed.chatId, messageId: parsed.messageId, pinAll: !!pinAll,
+            successCount: 0, failCount: 0, total: 0, status: 'sending', createdAt: admin.firestore.FieldValue.serverTimestamp()
+        });
+    } catch (e) { console.error("History create error:", e.message); }
+
+    res.json({ success: true, message: "Forwarding started...", historyId: historyRef ? historyRef.id : null });
+
+    const sendOne = async (userId) => {
+        const fwd = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/forwardMessage`, {
+            chat_id: userId, from_chat_id: parsed.chatId, message_id: parsed.messageId
+        });
+        if (pinAll && fwd && fwd.data && fwd.data.result) {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
+                chat_id: userId, message_id: fwd.data.result.message_id, disable_notification: true
+            }).catch(() => {});
+        }
+        return true;
+    };
+
+    try {
+        await broadcastToAllUsers(sendOne, historyRef);
+        if (historyRef) await historyRef.update({ status: 'done' }).catch(() => {});
+    } catch (error) {
+        console.error("Broadcast Forward Error:", error.message);
+        if (historyRef) await historyRef.update({ status: 'error' }).catch(() => {});
+    }
 });
 
 app.post('/api/broadcast-task', async (req, res) => {
