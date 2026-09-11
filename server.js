@@ -14,6 +14,8 @@ app.use(cors());
 const BOT_TOKEN = process.env.BOT_TOKEN; 
 const ADMIN_ID = process.env.ADMIN_ID || '7767338426'; 
 const BOT_START_TIME = Date.now();
+const REFERRAL_COMMISSION_PERCENT = 10; // used consistently in payout logic AND in any message text that mentions the rate
+const PARTY_POPPER_EFFECT_ID = "5046509860389126442"; // 🎉 Telegram message effect (private chats only, Bot API 7.2+)
 
 // Firebase Admin Setup
 if (process.env.FIREBASE_KEY) {
@@ -338,7 +340,11 @@ app.post('/api/broadcast-message', async (req, res) => {
     let reply_markup = undefined;
     const validButtons = (Array.isArray(buttons) ? buttons : []).filter(b => b && b.text && b.url && /^https?:\/\//i.test(String(b.url).trim()));
     if (validButtons.length > 0) {
-        reply_markup = { inline_keyboard: validButtons.map(b => [{ text: b.text, url: b.url.trim() }]) };
+        reply_markup = { inline_keyboard: validButtons.map(b => {
+            const btnObj = { text: b.text, url: b.url.trim() };
+            if (b.style && ['primary', 'success', 'danger'].includes(b.style)) btnObj.style = b.style; // Bot API 9.4+ button color
+            return [btnObj];
+        }) };
     }
 
     // Create the history record up-front (server-side) so it always reflects real, live progress
@@ -451,7 +457,7 @@ app.post('/api/admin/action', async (req, res) => {
 
     if (type === "Deposit" && status === 'Approved') {
         const depositAmount = parseFloat(amount);
-        const commissionRate = 0.10; // 10% Commission
+        const commissionRate = REFERRAL_COMMISSION_PERCENT / 100;
         const commission = depositAmount * commissionRate;
         const userFinalAmount = depositAmount - commission;
 
@@ -465,10 +471,10 @@ app.post('/api/admin/action', async (req, res) => {
                     mainBalance: admin.firestore.FieldValue.increment(commission),
                     refEarnings: admin.firestore.FieldValue.increment(commission)
                 });
-                const refMsg = `<b>New Deposit Commission Added 💰</b>\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(10% from Deposit)</blockquote>`;
+                const refMsg = `<b>New Deposit Commission Added 💰</b>\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(${REFERRAL_COMMISSION_PERCENT}% from Deposit)</blockquote>`;
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
-            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (10% Refer): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
+            const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (${REFERRAL_COMMISSION_PERCENT}% Refer): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
                 chat_id: userId, text: userMsg, parse_mode: 'HTML',
                 reply_markup: { inline_keyboard: [[{ text: "Check Wallet 💰", url: "https://t.me/RedExChangerBot/app" }]] }
@@ -487,7 +493,7 @@ app.post('/api/admin/action', async (req, res) => {
 
         let refCommission = 0;
         if (referrerId && afterFee) {
-            refCommission = afterFee * 0.10; // ১০% কমিশন হিসাব (fee কাটার পরে remaining amount থেকে)
+            refCommission = afterFee * (REFERRAL_COMMISSION_PERCENT / 100);
         }
         let finalBdtAmount = afterFee - refCommission;
 
@@ -516,7 +522,7 @@ app.post('/api/admin/action', async (req, res) => {
                     commissionGenerated: admin.firestore.FieldValue.increment(refCommission) // Track Commission from this user
                 });
                 
-                const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${refCommission.toFixed(2)} ৳\n<blockquote>(10% from Exchange)</blockquote>`;
+                const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${refCommission.toFixed(2)} ৳\n<blockquote>(${REFERRAL_COMMISSION_PERCENT}% from Exchange)</blockquote>`;
                 await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
             }
             res.json({ success: true });
@@ -583,7 +589,7 @@ app.post('/api/notify-exchange', async (req, res) => {
 
         let refCommission = 0;
         if (referrerId && afterFee) {
-            refCommission = afterFee * 0.10; // ১০% কমিশন হিসাব (fee কাটার পরে)
+            refCommission = afterFee * (REFERRAL_COMMISSION_PERCENT / 100);
         }
         let finalBdt = afterFee - refCommission;
 
@@ -608,8 +614,8 @@ app.post('/api/notify-exchange', async (req, res) => {
         await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
 
         // ---- Public Notification Channel/Group (set from Admin Panel Settings) ----
-        // Note: Telegram inline buttons cannot be colored via the Bot API — the "Let's Exchange Now"
-        // button will use Telegram's default button style, not a custom red color.
+        // UPDATE: Telegram added a real `style` field for buttons in Bot API 9.4 (Feb 2026) —
+        // 'primary' (blue), 'success' (green), 'danger' (red). Using 'danger' for red, as originally asked.
         const settings = await getAppSettings();
         const notifyChatId = settings.notifyChatId;
         if (notifyChatId) {
@@ -622,7 +628,7 @@ app.post('/api/notify-exchange', async (req, res) => {
                 `Exchange Method → <code>${sendMethod}</code>\n` +
                 `Payment Method → <code>${recMethod}</code>\n\n` +
                 `<blockquote>এখন খুচরো ডলার বিক্রি করুন সহজে পেমেন্ট নিন বিকাশ/নগদ এ।</blockquote>`;
-            const groupKeyboard = { inline_keyboard: [[{ text: "Let's Exchange Now", url: "https://t.me/RedExChangerBot/app?startapp" }]] };
+            const groupKeyboard = { inline_keyboard: [[{ text: "Let's Exchange Now", url: "https://t.me/RedExChangerBot/app?startapp", style: "danger" }]] };
             await sendMessageToTelegram(notifyChatId, groupMsg, groupKeyboard).catch(e => {});
         }
 
@@ -634,29 +640,53 @@ app.post('/api/notify-exchange', async (req, res) => {
 });
 
 // Notify New Referral
+const REFER_LINK = "https://t.me/RedExChangerBot/app"; // static link, per explicit request — note: without a
+// ?startapp=<referrerId> parameter Telegram can't attribute a new join back to this referrer if they share
+// this exact link onward. Kept static as asked; say the word and I'll add the tracking parameter back.
+
 app.post('/api/notify-refer-join', async (req, res) => {
     const { referrerId, newUserName, firstName } = req.body;
     if (!referrerId) return res.json({ success: false });
 
     try {
         const referSnap = await db.collection('users').where('referredBy', '==', String(referrerId)).get();
-        const referCount = referSnap.size || 1; 
+        const referCount = referSnap.size || 1;
+
+        const referrerDoc = await db.collection('users').doc(String(referrerId)).get();
+        const refEarnings = referrerDoc.exists ? (parseFloat(referrerDoc.data().refEarnings) || 0) : 0;
+
+        // Dollar equivalent uses the AVERAGE rate across all configured Exchange Methods, since no
+        // single method is marked as "the" reference rate. If you'd rather a specific method (e.g. only
+        // "Binance") drive this conversion, tell me which one and I'll pin it to that instead of averaging.
+        const methodsSnap = await db.collection('exchange_methods').get();
+        let avgRate = 0;
+        if (!methodsSnap.empty) {
+            let sum = 0, n = 0;
+            methodsSnap.forEach(d => { const r = parseFloat(d.data().rate); if (!isNaN(r) && r > 0) { sum += r; n++; } });
+            avgRate = n > 0 ? sum / n : 0;
+        }
+        const dollarEquivalent = avgRate > 0 ? (refEarnings / avgRate) : 0;
 
         const rawName = firstName || newUserName || "User";
         const safeName = String(rawName).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
         const msg = `<b>🆕 New Refer Joined!</b>\n\n` +
                     `Name: ${safeName}\n` +
-                    `Total Refer: ${referCount}\n\n` +
-                    `<i>You will receive a 10% commission when the person you refer makes a deposit or exchange.</i>`;
-                    
-        const keyboard = { inline_keyboard: [[{ text: "Open App", url: "https://t.me/RedExChangerBot/app" }]] };
+                    `Total Refer: <code>${referCount} User</code>\n` +
+                    `Total Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
+                    `Refer Link: <code>${REFER_LINK}</code>\n\n` +
+                    `<i>You will receive a ${REFERRAL_COMMISSION_PERCENT}% commission when the person you refer makes a deposit or exchange.</i>`;
+
+        // copy_text button: Bot API 7.11+ — tapping it copies the given text to the clipboard directly,
+        // no URL open needed.
+        const keyboard = { inline_keyboard: [[{ text: "📋 Copy Refer Link", copy_text: { text: REFER_LINK } }]] };
 
         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-            chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard
+            chat_id: referrerId, text: msg, parse_mode: 'HTML', reply_markup: keyboard,
+            message_effect_id: PARTY_POPPER_EFFECT_ID // 🎉 — private chats only
         });
         res.json({ success: true });
-    } catch (error) { res.json({ success: false }); }
+    } catch (error) { console.error("Notify Refer Join Error:", error.message); res.json({ success: false }); }
 });
 
 // NEW API: Get My Referrals List (WITH PAGINATION AND COMMISSION)
