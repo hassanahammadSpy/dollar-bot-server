@@ -334,7 +334,7 @@ async function sendWelcomeMessage(chatId, triggeringMessageId, firstName) {
     // client updated to support it; older clients just show the buttons in their normal default color.
     const keyboard = {
         inline_keyboard: [
-            [{ text: "Let's Open Now", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
+            [{ text: "→ Let's Open App", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
             [
                 { text: "Join Channel", url: "https://t.me/RedExChanger", style: "success" },
                 { text: "Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
