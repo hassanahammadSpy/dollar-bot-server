@@ -296,13 +296,13 @@ async function getReferStats(userId) {
 async function sendReferStatsCommand(userId) {
     const { referCount, refEarnings, dollarEquivalent, referLink } = await getReferStats(userId);
 
-    const msg = `<b>📊 Your Refer Stats</b>\n\n` +
-                `Total Refer: <code>${referCount} User</code>\n` +
-                `Total Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
+    const msg = `<b>Your Refer Stats</b>\n\n` +
+                `Refer: <code>${referCount} User</code>\n` +
+                `Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
                 `Refer Link: <code>${referLink}</code>\n\n` +
                 `<i>You will receive a ${REFERRAL_COMMISSION_PERCENT}% commission when the person you refer makes a deposit or exchange.</i>`;
 
-    const keyboard = { inline_keyboard: [[{ text: "📋 Copy Refer Link", copy_text: { text: referLink } }]] };
+    const keyboard = { inline_keyboard: [[{ text: " Copy Refer Link", copy_text: { text: referLink } }]] };
 
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard,
@@ -336,8 +336,8 @@ async function sendWelcomeMessage(chatId, triggeringMessageId, firstName) {
         inline_keyboard: [
             [{ text: "Let's Open Now", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
             [
-                { text: "📢 Join Channel", url: "https://t.me/RedExChanger", style: "success" },
-                { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
+                { text: "Join Channel", url: "https://t.me/RedExChanger", style: "success" },
+                { text: "Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
             ]
         ]
     };
