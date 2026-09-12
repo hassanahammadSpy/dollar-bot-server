@@ -95,17 +95,33 @@ async function broadcastToAllUsers(sendOneFn, historyRef) {
     const users = usersSnapshot.docs.map(d => d.id);
     const BATCH_SIZE = 25;
     let success = 0, fail = 0;
+    let lastError = null;
 
     for (let i = 0; i < users.length; i += BATCH_SIZE) {
         const batch = users.slice(i, i + BATCH_SIZE);
-        const results = await Promise.all(batch.map(uid => sendOneFn(uid).catch(() => false)));
-        results.forEach(ok => ok ? success++ : fail++);
+        const results = await Promise.all(batch.map(uid => sendOneFn(uid).then(
+            () => ({ ok: true }),
+            (err) => ({ ok: false, err })
+        )));
+        results.forEach(r => {
+            if (r.ok) { success++; }
+            else {
+                fail++;
+                // Keep the most recent real error message so it's visible in the Admin Panel's
+                // Broadcast History (instead of only ever showing "0 success" with no explanation).
+                const apiErr = r.err && r.err.response && r.err.response.data && r.err.response.data.description;
+                lastError = apiErr || (r.err && r.err.message) || 'Unknown error';
+                console.error("Broadcast send failed for a user:", lastError);
+            }
+        });
         if (historyRef) {
-            await historyRef.update({ successCount: success, failCount: fail, total: users.length }).catch(() => {});
+            const update = { successCount: success, failCount: fail, total: users.length };
+            if (lastError) update.lastError = lastError;
+            await historyRef.update(update).catch(() => {});
         }
         if (i + BATCH_SIZE < users.length) await new Promise(r => setTimeout(r, 1000));
     }
-    return { success, fail, total: users.length };
+    return { success, fail, total: users.length, lastError };
 }
 
 // 1. চ্যানেল টাস্ক ভেরিফিকেশন
@@ -247,7 +263,113 @@ async function buildPingMessage(latencyMs) {
         `─────────────────────`;
 }
 
-// Webhook Handler (/start, /ping, callback_query)
+// --- Helper: compute a user's own referral stats (used by both the "New Refer Joined" push
+// notification and the on-demand /ref command) ---
+async function getReferStats(userId) {
+    const referSnap = await db.collection('users').where('referredBy', '==', String(userId)).get();
+    const referCount = referSnap.size || 0;
+
+    const userDoc = await db.collection('users').doc(String(userId)).get();
+    const refEarnings = userDoc.exists ? (parseFloat(userDoc.data().refEarnings) || 0) : 0;
+
+    // Refer link uses the tracking format (?startapp=<userId>) so shares of it correctly attribute
+    // new joins back to this user — same pattern the mini-app's own "My Refer" tab uses.
+    const settings = await getAppSettings();
+    const botUsername = settings.botUsername || "RedExChangerBot";
+    const referLink = `https://t.me/${botUsername}?startapp=${userId}`;
+
+    // Dollar equivalent uses the AVERAGE rate across all configured Exchange Methods, since no single
+    // method is marked as "the" reference rate.
+    const methodsSnap = await db.collection('exchange_methods').get();
+    let avgRate = 0;
+    if (!methodsSnap.empty) {
+        let sum = 0, n = 0;
+        methodsSnap.forEach(d => { const r = parseFloat(d.data().rate); if (!isNaN(r) && r > 0) { sum += r; n++; } });
+        avgRate = n > 0 ? sum / n : 0;
+    }
+    const dollarEquivalent = avgRate > 0 ? (refEarnings / avgRate) : 0;
+
+    return { referCount, refEarnings, dollarEquivalent, referLink };
+}
+
+// --- Helper: send the /ref stats summary on demand ---
+async function sendReferStatsCommand(userId) {
+    const { referCount, refEarnings, dollarEquivalent, referLink } = await getReferStats(userId);
+
+    const msg = `<b>📊 Your Refer Stats</b>\n\n` +
+                `Total Refer: <code>${referCount} User</code>\n` +
+                `Total Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
+                `Refer Link: <code>${referLink}</code>\n\n` +
+                `<i>You will receive a ${REFERRAL_COMMISSION_PERCENT}% commission when the person you refer makes a deposit or exchange.</i>`;
+
+    const keyboard = { inline_keyboard: [[{ text: "📋 Copy Refer Link", copy_text: { text: referLink } }]] };
+
+    await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+        chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard,
+        message_effect_id: PARTY_POPPER_EFFECT_ID // 🎉 — private chats only
+    });
+}
+
+// --- Helper: send (or re-send) the welcome message. Deletes the previous welcome message this user
+// received (if any) and the message that triggered this call, so repeated /start (or any random
+// message — see the webhook's fallback branch) never piles up old welcome messages in the chat. ---
+async function sendWelcomeMessage(chatId, triggeringMessageId, firstName) {
+    // Delete the previous welcome message, if we have one on record for this chat.
+    try {
+        const stateDoc = await db.collection('users').doc(String(chatId)).get();
+        const prevMsgId = stateDoc.exists ? stateDoc.data().lastWelcomeMsgId : null;
+        if (prevMsgId) {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: prevMsgId }).catch(() => {});
+        }
+    } catch (e) {}
+
+    // Delete the message that triggered this (the "/start" text itself, or whatever the user sent).
+    if (triggeringMessageId) {
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: triggeringMessageId }).catch(() => {});
+    }
+
+    const welcomeMsg = `Hi! ${firstName || 'there'} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
+
+    // style: 'danger' (red) / 'success' (green) — real Bot API 9.4+ field (Feb 2026). Needs a Telegram
+    // client updated to support it; older clients just show the buttons in their normal default color.
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "Let's Open Now", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
+            [
+                { text: "📢 Join Channel", url: "https://t.me/RedExChanger", style: "success" },
+                { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
+            ]
+        ]
+    };
+
+    const hasStyledButton = keyboard.inline_keyboard.some(row => row.some(b => b.style));
+    let sent;
+    try {
+        sent = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+            chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML',
+            message_effect_id: FIRE_EFFECT_ID // 🔥 — private chats only
+        });
+    } catch (err) {
+        const detail = err.response ? JSON.stringify(err.response.data) : err.message;
+        if (hasStyledButton) {
+            console.error("Welcome message with styled buttons failed, retrying without style:", detail);
+            sent = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                chat_id: chatId, text: welcomeMsg, reply_markup: stripButtonStyle(keyboard), parse_mode: 'HTML',
+                message_effect_id: FIRE_EFFECT_ID
+            });
+        } else {
+            console.error("Welcome message failed:", detail);
+            throw err;
+        }
+    }
+
+    const newMsgId = sent.data && sent.data.result ? sent.data.result.message_id : null;
+    if (newMsgId) {
+        await db.collection('users').doc(String(chatId)).set({ lastWelcomeMsgId: newMsgId }, { merge: true }).catch(() => {});
+    }
+}
+
+// Webhook Handler (/start, /ping, /ref, callback_query)
 app.post('/webhook', async (req, res) => {
     try {
         const update = req.body;
@@ -261,12 +383,7 @@ app.post('/webhook', async (req, res) => {
 
             if (command === '/start') {
                 const firstName = update.message.from.first_name || "User";
-                const welcomeMsg = `Hi! ${firstName} Welcome to RedExChanger.\n\nHere you can exchange your small dollar amounts and receive payment via BKash / Nagad. You can also earn money by completing tasks.\n\nPlus, you’ll get commission by referring others. So don’t waste any time — start earning now!\n\nSupport: @RedExSupportBot`;
-                const keyboard = { inline_keyboard: [[{ text: "🚀 Open App", url: "https://t.me/RedExChangerBot/app" }], [{ text: "📢 Join Channel", url: "https://t.me/RedExChanger" }, { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup" }]] };
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
-                    chat_id: chatId, text: welcomeMsg, reply_markup: keyboard, parse_mode: 'HTML',
-                    message_effect_id: FIRE_EFFECT_ID // 🔥 — private chats only
-                });
+                await sendWelcomeMessage(chatId, messageId, firstName);
             } 
             else if (command === '/ping') {
                 // Note: Telegram inline buttons cannot be given a custom color via the Bot API —
@@ -295,6 +412,18 @@ app.post('/webhook', async (req, res) => {
                         await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: messageId });
                     } catch (e) {}
                 }, 300000);
+            }
+            else if (command === '/ref') {
+                await sendReferStatsCommand(chatId).catch(e => console.error("/ref error:", e.message));
+            }
+            else {
+                // Any other message (plain text, unknown command, sticker caption, etc.) — auto-run the
+                // same welcome flow as /start. Only applies to private chats: in groups this would delete
+                // the welcome message every time anyone talks, which isn't useful there.
+                if (update.message.chat.type === 'private') {
+                    const firstName = update.message.from.first_name || "User";
+                    await sendWelcomeMessage(chatId, messageId, firstName);
+                }
             }
         } 
         
@@ -354,22 +483,62 @@ app.post('/api/broadcast-message', async (req, res) => {
     // Create the history record up-front (server-side) so it always reflects real, live progress
     // instead of a hardcoded 0/0 written once from the client.
     let historyRef = null;
+    let historyError = null;
     try {
         historyRef = await db.collection('broadcast_history').add({
             type: 'message', text: text || '', image: image || '', buttons: validButtons, pinAll: !!pinAll,
             successCount: 0, failCount: 0, total: 0, status: 'sending', createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
-    } catch (e) { console.error("History create error:", e.message); }
+    } catch (e) {
+        historyError = e.message;
+        console.error("History create error:", e.message);
+    }
 
-    res.json({ success: true, message: "Broadcasting message started...", historyId: historyRef ? historyRef.id : null });
+    // If Firestore itself is unreachable/misconfigured (bad FIREBASE_KEY, wrong project, etc.), the
+    // broadcast can still go out, but the admin needs to actually SEE that history couldn't be saved —
+    // otherwise it silently looks like "history just doesn't work" with no clue why.
+    res.json({
+        success: true,
+        message: "Broadcasting message started...",
+        historyId: historyRef ? historyRef.id : null,
+        historyWarning: historyError ? `History save failed: ${historyError}` : null
+    });
+
+    const hasStyledButton = reply_markup && reply_markup.inline_keyboard &&
+        reply_markup.inline_keyboard.some(row => row.some(b => b.style));
+
+    // Strips the `style` field (Bot API 9.4+ button color) from a keyboard, for the fallback retry below.
+    function stripStyle(markup) {
+        if (!markup || !markup.inline_keyboard) return markup;
+        return { inline_keyboard: markup.inline_keyboard.map(row => row.map(({ style, ...rest }) => rest)) };
+    }
 
     const sendOne = async (userId) => {
+        const doSend = async (markup) => {
+            let sentMsg;
+            if (image) {
+                sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup: markup });
+            } else {
+                sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup: markup });
+            }
+            return sentMsg;
+        };
+
         let sentMsg;
-        if (image) {
-            sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, { chat_id: userId, photo: image, caption: text || '', parse_mode: 'HTML', reply_markup });
-        } else {
-            sentMsg = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: userId, text: text, parse_mode: 'HTML', reply_markup });
+        try {
+            sentMsg = await doSend(reply_markup);
+        } catch (err) {
+            // If a colored button caused Telegram to reject the WHOLE message, retry once without
+            // color so the button (and the message) still reach the user — better a plain button
+            // than no message at all.
+            if (hasStyledButton) {
+                console.error("Send with styled button failed, retrying without style:", err.response ? JSON.stringify(err.response.data) : err.message);
+                sentMsg = await doSend(stripStyle(reply_markup));
+            } else {
+                throw err;
+            }
         }
+
         if (pinAll && sentMsg && sentMsg.data && sentMsg.data.result) {
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/pinChatMessage`, {
                 chat_id: userId, message_id: sentMsg.data.result.message_id, disable_notification: true
@@ -395,14 +564,23 @@ app.post('/api/broadcast-forward', async (req, res) => {
     if (!parsed) return res.json({ success: false, message: "Invalid Telegram post link. Use https://t.me/channel/123 or https://t.me/c/1234567890/123" });
 
     let historyRef = null;
+    let historyError = null;
     try {
         historyRef = await db.collection('broadcast_history').add({
             type: 'forward', postLink, fromChatId: parsed.chatId, messageId: parsed.messageId, pinAll: !!pinAll,
             successCount: 0, failCount: 0, total: 0, status: 'sending', createdAt: admin.firestore.FieldValue.serverTimestamp()
         });
-    } catch (e) { console.error("History create error:", e.message); }
+    } catch (e) {
+        historyError = e.message;
+        console.error("History create error:", e.message);
+    }
 
-    res.json({ success: true, message: "Forwarding started...", historyId: historyRef ? historyRef.id : null });
+    res.json({
+        success: true,
+        message: "Forwarding started...",
+        historyId: historyRef ? historyRef.id : null,
+        historyWarning: historyError ? `History save failed: ${historyError}` : null
+    });
 
     const sendOne = async (userId) => {
         const fwd = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/forwardMessage`, {
@@ -476,7 +654,7 @@ app.post('/api/admin/action', async (req, res) => {
                     refEarnings: admin.firestore.FieldValue.increment(commission)
                 });
                 const refMsg = `<b>New Deposit Commission Added 💰</b>\nUser: @${userName}\nAmount: ${commission.toFixed(2)} ৳\n<blockquote>(${REFERRAL_COMMISSION_PERCENT}% from Deposit)</blockquote>`;
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML', message_effect_id: PARTY_POPPER_EFFECT_ID }).catch(e => {});
             }
             const userMsg = `Your Deposit Approved! ${icon}\n\nAmount: ${amount} ৳\nFee (${REFERRAL_COMMISSION_PERCENT}% Refer): -${commission.toFixed(2)} ৳\nAdded: ${userFinalAmount.toFixed(2)} ৳\n\n@RedExChanger`;
             await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -527,7 +705,7 @@ app.post('/api/admin/action', async (req, res) => {
                 });
                 
                 const refMsg = `<b>New Exchange Commission Added 💰</b>\nUser: @${userName}\nAmount: ${refCommission.toFixed(2)} ৳\n<blockquote>(${REFERRAL_COMMISSION_PERCENT}% from Exchange)</blockquote>`;
-                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML' }).catch(e => {});
+                await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: referrerId, text: refMsg, parse_mode: 'HTML', message_effect_id: PARTY_POPPER_EFFECT_ID }).catch(e => {});
             }
             res.json({ success: true });
         } catch (error) { res.json({ success: false }); }
@@ -736,27 +914,52 @@ app.get('/api/my-referrals/:userId', async (req, res) => {
 });
 
 
+// Strips the `style` field (Bot API 9.4+ button color) from a keyboard, for the fallback retry below.
+function stripButtonStyle(markup) {
+    if (!markup || !markup.inline_keyboard) return markup;
+    return { inline_keyboard: markup.inline_keyboard.map(row => row.map(({ style, ...rest }) => rest)) };
+}
+
 // Utility to send message with optional keyboard & Image Support
 async function sendMessageToTelegram(chatId, text, reply_markup = {}, imageUrl = null) {
-    try { 
+    const hasStyled = reply_markup && reply_markup.inline_keyboard && reply_markup.inline_keyboard.some(row => row.some(b => b.style));
+
+    const doSend = async (markup) => {
         if (imageUrl && imageUrl.startsWith('http')) {
-            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
+            return axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendPhoto`, {
                 chat_id: chatId,
                 photo: imageUrl,
                 caption: text,
                 parse_mode: 'HTML',
-                reply_markup: reply_markup
+                reply_markup: markup
             });
         } else {
-            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { 
-                chat_id: chatId, 
-                text: text, 
+            return axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
+                chat_id: chatId,
+                text: text,
                 parse_mode: 'HTML',
-                reply_markup: reply_markup
-            }); 
+                reply_markup: markup
+            });
         }
+    };
+
+    try {
+        await doSend(reply_markup);
     } catch (e) {
-        console.error("Admin Notify Error:", e.message);
+        const detail = e.response ? JSON.stringify(e.response.data) : e.message;
+        // If a colored button caused Telegram to reject the WHOLE message, retry once without color
+        // so the message (and button) still reach the recipient.
+        if (hasStyled) {
+            console.error("Admin Notify Error (styled button, retrying without style):", detail);
+            try {
+                await doSend(stripButtonStyle(reply_markup));
+                return;
+            } catch (e2) {
+                console.error("Admin Notify Error (fallback also failed):", e2.response ? JSON.stringify(e2.response.data) : e2.message);
+                return;
+            }
+        }
+        console.error("Admin Notify Error:", detail);
     }
 }
 
