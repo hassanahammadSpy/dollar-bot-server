@@ -265,6 +265,19 @@ async function buildPingMessage(latencyMs) {
 
 // --- Helper: compute a user's own referral stats (used by both the "New Refer Joined" push
 // notification and the on-demand /ref command) ---
+// --- Helper: average ৳-per-$ rate across all configured Exchange Methods (no single method is marked
+// as "the" reference rate, so this averages all of them). Falls back to 125 if none are configured. ---
+async function getAverageBdtRate() {
+    const methodsSnap = await db.collection('exchange_methods').get();
+    let avgRate = 0;
+    if (!methodsSnap.empty) {
+        let sum = 0, n = 0;
+        methodsSnap.forEach(d => { const r = parseFloat(d.data().rate); if (!isNaN(r) && r > 0) { sum += r; n++; } });
+        avgRate = n > 0 ? sum / n : 0;
+    }
+    return avgRate > 0 ? avgRate : 125; // fallback default
+}
+
 async function getReferStats(userId) {
     const referSnap = await db.collection('users').where('referredBy', '==', String(userId)).get();
     const referCount = referSnap.size || 0;
@@ -278,16 +291,8 @@ async function getReferStats(userId) {
     const botUsername = settings.botUsername || "RedExChangerBot";
     const referLink = `https://t.me/${botUsername}?startapp=${userId}`;
 
-    // Dollar equivalent uses the AVERAGE rate across all configured Exchange Methods, since no single
-    // method is marked as "the" reference rate.
-    const methodsSnap = await db.collection('exchange_methods').get();
-    let avgRate = 0;
-    if (!methodsSnap.empty) {
-        let sum = 0, n = 0;
-        methodsSnap.forEach(d => { const r = parseFloat(d.data().rate); if (!isNaN(r) && r > 0) { sum += r; n++; } });
-        avgRate = n > 0 ? sum / n : 0;
-    }
-    const dollarEquivalent = avgRate > 0 ? (refEarnings / avgRate) : 0;
+    const bdtRate = await getAverageBdtRate();
+    const dollarEquivalent = refEarnings / bdtRate;
 
     return { referCount, refEarnings, dollarEquivalent, referLink };
 }
@@ -296,13 +301,13 @@ async function getReferStats(userId) {
 async function sendReferStatsCommand(userId) {
     const { referCount, refEarnings, dollarEquivalent, referLink } = await getReferStats(userId);
 
-    const msg = `<b>Your Refer Stats</b>\n\n` +
-                `Refer: <code>${referCount} User</code>\n` +
-                `Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
+    const msg = `<b>📊 Your Refer Stats</b>\n\n` +
+                `Total Refer: <code>${referCount} User</code>\n` +
+                `Total Commission: <code>${refEarnings.toFixed(2)}৳ =${dollarEquivalent.toFixed(2)}$</code>\n` +
                 `Refer Link: <code>${referLink}</code>\n\n` +
                 `<i>You will receive a ${REFERRAL_COMMISSION_PERCENT}% commission when the person you refer makes a deposit or exchange.</i>`;
 
-    const keyboard = { inline_keyboard: [[{ text: " Copy Refer Link", copy_text: { text: referLink } }]] };
+    const keyboard = { inline_keyboard: [[{ text: "📋 Copy Refer Link", copy_text: { text: referLink } }]] };
 
     await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         chat_id: userId, text: msg, parse_mode: 'HTML', reply_markup: keyboard,
@@ -334,10 +339,10 @@ async function sendWelcomeMessage(chatId, triggeringMessageId, firstName) {
     // client updated to support it; older clients just show the buttons in their normal default color.
     const keyboard = {
         inline_keyboard: [
-            [{ text: "→ Let's Open App", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
+            [{ text: "Let's Open Now", url: "https://t.me/RedExChangerBot/app", style: "danger" }],
             [
-                { text: "Join Channel", url: "https://t.me/RedExChanger", style: "success" },
-                { text: "Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
+                { text: "📢 Join Channel", url: "https://t.me/RedExChanger", style: "success" },
+                { text: "👥 Join Group", url: "https://t.me/RedExChangerGroup", style: "success" }
             ]
         ]
     };
@@ -962,6 +967,61 @@ async function sendMessageToTelegram(chatId, text, reply_markup = {}, imageUrl =
         console.error("Admin Notify Error:", detail);
     }
 }
+
+// --- Coin Price Update (Admin Panel: Settings → Coin Price Update) ---
+// Fetches live prices from Binance's public, key-free market-data domain (data-api.binance.vision —
+// this is Binance's dedicated endpoint for market data only, which avoids the geo-restrictions that
+// can block the main api.binance.com from some server regions) and posts them to a Telegram chat.
+async function fetchBinancePrices(coinSymbols) {
+    const pairs = coinSymbols.map(c => `${c.toUpperCase()}USDT`);
+    const symbolsParam = encodeURIComponent(JSON.stringify(pairs));
+    const res = await axios.get(`https://data-api.binance.vision/api/v3/ticker/price?symbols=${symbolsParam}`);
+    const map = {};
+    (Array.isArray(res.data) ? res.data : []).forEach(item => {
+        const coin = item.symbol.replace(/USDT$/, '');
+        map[coin] = parseFloat(item.price);
+    });
+    return map;
+}
+
+async function coinUpdateTick() {
+    try {
+        const settingsDoc = await db.collection('settings').doc('appConfig').get();
+        const settings = settingsDoc.exists ? settingsDoc.data() : {};
+        if (!settings.coinUpdateEnabled) return;
+
+        const intervalMin = parseFloat(settings.coinUpdateIntervalMinutes) || 3;
+        const lastAt = (settings.lastCoinUpdateAt && typeof settings.lastCoinUpdateAt.toMillis === 'function') ? settings.lastCoinUpdateAt.toMillis() : 0;
+        if (Date.now() - lastAt < intervalMin * 60 * 1000) return; // not due yet
+
+        const chatId = settings.coinUpdateChatId || settings.notifyChatId;
+        if (!chatId) { console.error("Coin Update: no coinUpdateChatId/notifyChatId set in Settings."); return; }
+
+        const coinList = String(settings.coinSymbols || "BTC,BNB,TRX").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        const [prices, bdtRate] = await Promise.all([fetchBinancePrices(coinList), getAverageBdtRate()]);
+
+        let msg = `<b>💱 Live Coin Prices</b>\n\n`;
+        msg += `USDT → <code>${bdtRate.toFixed(2)} ৳</code>\n`;
+        coinList.forEach(coin => {
+            const price = prices[coin];
+            if (price !== undefined && !isNaN(price)) {
+                const decimals = price >= 1 ? 2 : 4;
+                msg += `${coin} → <code>$${price.toFixed(decimals)} (${(price * bdtRate).toFixed(2)} ৳)</code>\n`;
+            }
+        });
+        msg += `\n<i>Updated: ${new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', hour12: true })}</i>`;
+
+        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: msg, parse_mode: 'HTML' });
+
+        await db.collection('settings').doc('appConfig').set({ lastCoinUpdateAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {});
+    } catch (e) {
+        console.error("Coin Update Error:", e.response ? JSON.stringify(e.response.data) : e.message);
+    }
+}
+
+// Checked every 30s; actual posting cadence is controlled by coinUpdateIntervalMinutes in Settings
+// (compared against lastCoinUpdateAt, which is stored in Firestore so the cadence survives restarts).
+setInterval(coinUpdateTick, 30000);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => { console.log(`Server running on port ${PORT}`); });
