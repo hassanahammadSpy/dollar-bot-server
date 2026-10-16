@@ -1003,12 +1003,14 @@ async function coinUpdateTick() {
         // No emoji anywhere in this message, as requested.
         let msg = `<b>Live Coin Prices</b>\n\n`;
         msg += `USDT - <code>${bdtRate.toFixed(2)} ৳</code>\n`;
-        coinList.forEach(coin => {
+        // Highest price first.
+        const sortedCoins = coinList
+            .filter(coin => prices[coin] !== undefined && !isNaN(prices[coin]))
+            .sort((a, b) => prices[b] - prices[a]);
+        sortedCoins.forEach(coin => {
             const price = prices[coin];
-            if (price !== undefined && !isNaN(price)) {
-                const decimals = price >= 1 ? 2 : 4;
-                msg += `${coin} - <code>$${price.toFixed(decimals)} (${(price * bdtRate).toFixed(2)} ৳)</code>\n`;
-            }
+            const decimals = price >= 1 ? 2 : 4;
+            msg += `${coin} - <code>$${price.toFixed(decimals)} (${(price * bdtRate).toFixed(2)} ৳)</code>\n`;
         });
         msg += `\n<i>Updated: ${new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', hour12: true })}</i>`;
 
