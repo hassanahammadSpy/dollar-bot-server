@@ -997,23 +997,34 @@ async function coinUpdateTick() {
         const chatId = settings.coinUpdateChatId || settings.notifyChatId;
         if (!chatId) { console.error("Coin Update: no coinUpdateChatId/notifyChatId set in Settings."); return; }
 
-        const coinList = String(settings.coinSymbols || "BTC,BNB,TRX").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        const coinList = String(settings.coinSymbols || "BTC,ETH,BNB,TRX,LTC,SOL,XRP,DOGE,ADA").split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
         const [prices, bdtRate] = await Promise.all([fetchBinancePrices(coinList), getAverageBdtRate()]);
 
-        let msg = `<b>💱 Live Coin Prices</b>\n\n`;
-        msg += `USDT → <code>${bdtRate.toFixed(2)} ৳</code>\n`;
+        // No emoji anywhere in this message, as requested.
+        let msg = `<b>Live Coin Prices</b>\n\n`;
+        msg += `USDT - <code>${bdtRate.toFixed(2)} ৳</code>\n`;
         coinList.forEach(coin => {
             const price = prices[coin];
             if (price !== undefined && !isNaN(price)) {
                 const decimals = price >= 1 ? 2 : 4;
-                msg += `${coin} → <code>$${price.toFixed(decimals)} (${(price * bdtRate).toFixed(2)} ৳)</code>\n`;
+                msg += `${coin} - <code>$${price.toFixed(decimals)} (${(price * bdtRate).toFixed(2)} ৳)</code>\n`;
             }
         });
         msg += `\n<i>Updated: ${new Date().toLocaleString('en-GB', { timeZone: 'Asia/Dhaka', hour12: true })}</i>`;
 
-        await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: msg, parse_mode: 'HTML' });
+        // Delete the previous coin-price message before posting the new one, so each update's
+        // "delete time" matches the send interval exactly — only one stays visible at a time.
+        if (settings.lastCoinMsgId) {
+            await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/deleteMessage`, { chat_id: chatId, message_id: settings.lastCoinMsgId }).catch(() => {});
+        }
 
-        await db.collection('settings').doc('appConfig').set({ lastCoinUpdateAt: admin.firestore.FieldValue.serverTimestamp() }, { merge: true }).catch(() => {});
+        const sent = await axios.post(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, { chat_id: chatId, text: msg, parse_mode: 'HTML' });
+        const newMsgId = sent.data && sent.data.result ? sent.data.result.message_id : null;
+
+        await db.collection('settings').doc('appConfig').set({
+            lastCoinUpdateAt: admin.firestore.FieldValue.serverTimestamp(),
+            lastCoinMsgId: newMsgId
+        }, { merge: true }).catch(() => {});
     } catch (e) {
         console.error("Coin Update Error:", e.response ? JSON.stringify(e.response.data) : e.message);
     }
