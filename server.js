@@ -381,7 +381,21 @@ async function sendWelcomeMessage(chatId, triggeringMessageId, firstName) {
 // document in Firestore (admin_state/<userId>) so it survives server restarts.
 // =====================================================================================
 const ADMIN_IDS = String(process.env.ADMIN_IDS || ADMIN_ID).split(',').map(s => s.trim()).filter(Boolean);
-const isAdmin = id => ADMIN_IDS.includes(String(id));
+const isOwner = id => ADMIN_IDS.includes(String(id));   // env-configured; only owners can add/remove admins from the bot
+let dynamicAdminIds = new Set();                          // admins added via web panel / bot (Firestore: bot_admins/<telegramId>)
+const isAdmin = id => isOwner(id) || dynamicAdminIds.has(String(id));
+async function refreshAdminCache() {
+    try { const s = await db.collection('bot_admins').get(); dynamicAdminIds = new Set(s.docs.map(d => d.id)); }
+    catch (e) { console.error('Admin cache refresh failed:', e.message); }
+}
+refreshAdminCache();
+setInterval(refreshAdminCache, 30000); // picks up admins added/removed from the web panel within 30s
+
+// Request notifications (with Approve/Reject buttons) go to the main ADMIN_ID and every added admin.
+async function notifyAdmins(text, kb, imageUrl) {
+    const targets = new Set([String(ADMIN_ID), ...dynamicAdminIds]);
+    await Promise.all([...targets].map(t => sendMessageToTelegram(t, text, kb, imageUrl)));
+}
 
 const esc = s => String(s === undefined || s === null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 const tsMs = t => (t && typeof t.toMillis === 'function') ? t.toMillis() : 0;
@@ -534,7 +548,7 @@ async function showMainMenu(ctx) {
         [B('Tasks', 'adm:l:tsk:0'), B('Broadcast', 'adm:bc')],
         [B('Methods', 'adm:mt'), B('Settings', 'adm:set')],
         [B('Content', 'adm:ct'), B('Popup Ads', 'adm:l:ads:0')],
-        [B('Users', 'adm:us')]
+        [B('Users', 'adm:us'), B('Admins', 'adm:ad')]
     ]));
 }
 
@@ -729,6 +743,22 @@ async function admShowUser(ctx, uid) {
         KB([[d.banned ? B('Unban', `adm:ub:${uid}:0`, 'success') : B('Ban', `adm:ub:${uid}:1`, 'danger')], [B('Users', 'adm:us'), B('Main Menu', 'adm:home')]]));
 }
 
+// ---------- admins (owners only) ----------
+async function admShowAdmins(ctx) {
+    const snap = await db.collection('bot_admins').get();
+    let text = `<b>Admins</b>\n\nOwners (server env): ${ADMIN_IDS.map(i => `<code>${esc(i)}</code>`).join(', ')}\n\nAdded admins:\n`;
+    const rows = [];
+    snap.docs.forEach(d => {
+        const x = d.data();
+        text += `<code>${esc(d.id)}</code> ${esc(x.name || '')}\n`;
+        rows.push([B(`Remove ${d.id}`, `adm:adr:${d.id}`, 'danger')]);
+    });
+    if (snap.empty) text += '-\n';
+    rows.push([B('Add Admin', 'adm:ada', 'success')]);
+    rows.push([B('Main Menu', 'adm:home')]);
+    await adminShow(ctx, text, KB(rows));
+}
+
 // ---------- broadcast ----------
 const COLOR_MAP = { blue: 'primary', green: 'success', red: 'danger' };
 
@@ -820,6 +850,21 @@ async function admProcessInput(m, st, txt, cmd) {
         await clearAdminState(uid);
         await adminSend(chatId, 'Saved.');
         await admShowSettings({ chatId });
+        return;
+    }
+
+    if (st.mode === 'addadmin') {
+        if (!isOwner(uid)) { await clearAdminState(uid); await adminSend(chatId, 'শুধু Owner Admin যোগ করতে পারবে।'); return; }
+        if (!/^\d+$/.test(txt)) { await adminSend(chatId, 'শুধু সংখ্যার Chat ID (User ID) পাঠান।'); return; }
+        if (isOwner(txt)) { await adminSend(chatId, 'এই ID আগে থেকেই Owner।'); return; }
+        let name = '';
+        try { const c = await tg('getChat', { chat_id: txt }); const r = c.result || {}; name = [r.first_name, r.last_name].filter(Boolean).join(' ') || r.username || ''; } catch (e) { /* user hasn't started the bot yet */ }
+        await db.collection('bot_admins').doc(txt).set({ name, addedBy: String(uid), addedAt: admin.firestore.FieldValue.serverTimestamp() });
+        dynamicAdminIds.add(txt);
+        await clearAdminState(uid);
+        const noted = await adminSend(txt, 'আপনাকে Admin করা হয়েছে। Admin Panel খুলতে /admin পাঠান।').then(() => true, () => false);
+        await adminSend(chatId, `Admin যোগ হয়েছে: <code>${esc(txt)}</code> ${esc(name)}${noted ? '' : '\n(সতর্কতা: ওই ইউজার এখনো বটে /start দেননি, তাই মেসেজ পাঠানো যায়নি। বট ওপেন করে /start দিলে তবেই /admin কাজ করবে।)'}`);
+        await admShowAdmins({ chatId });
         return;
     }
 
@@ -960,6 +1005,14 @@ async function adminHandleCallback(cbq) {
                 break;
             }
 
+            case 'ad': if (!isOwner(uid)) { toast = 'শুধু Owner'; break; } await admShowAdmins(ctx); break;
+            case 'ada': if (!isOwner(uid)) { toast = 'শুধু Owner'; break; }
+                await setAdminState(uid, { mode: 'addadmin' });
+                await adminSend(chatId, 'নতুন Admin-এর Telegram Chat ID (User ID) পাঠান:\n(সংখ্যা, যেমন 123456789)\n\n/cancel দিয়ে বাতিল');
+                break;
+            case 'adr': if (!isOwner(uid)) { toast = 'শুধু Owner'; break; }
+                await db.collection('bot_admins').doc(String(p[2])).delete(); dynamicAdminIds.delete(String(p[2]));
+                await clearAdminState(p[2]); toast = 'Admin সরানো হয়েছে'; await admShowAdmins(ctx); break;
             case 'us': await adminShow(ctx, '<b>Users</b>', KB([[B('Find User by ID', 'adm:uf')], [B('Stats', 'adm:stats')], [B('Main Menu', 'adm:home')]])); break;
             case 'uf': await setAdminState(uid, { mode: 'user' }); await adminSend(chatId, 'User-এর Telegram ID পাঠান:\n/cancel দিয়ে বাতিল'); break;
             case 'ub': {
@@ -1034,6 +1087,10 @@ app.post('/webhook', async (req, res) => {
 
         // /admin panel: admins (private chat only) get first pick of every message so typed input
         // for an in-progress admin action is never mistaken for a normal user message.
+        if (update.message && update.message.chat && update.message.chat.type === 'private' && update.message.from &&
+            !isAdmin(update.message.from.id) && /^\/admin(@\w+)?(\s|$)/.test(update.message.text || '')) {
+            await refreshAdminCache(); // admin may have just been added from the web panel
+        }
         if (update.message && update.message.chat && update.message.chat.type === 'private' && update.message.from && isAdmin(update.message.from.id)) {
             const handled = await adminHandleMessage(update.message);
             if (handled) return res.sendStatus(200);
@@ -1409,7 +1466,7 @@ app.post('/api/notify-deposit', async (req, res) => {
             { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
         ]]
     };
-    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
+    await notifyAdmins(adminMsg, keyboard, imageUrl);
     res.json({ success: true });
 });
 
@@ -1427,7 +1484,7 @@ app.post('/api/notify-withdraw', async (req, res) => {
             { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
         ]]
     };             
-    await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard);
+    await notifyAdmins(adminMsg, keyboard);
     res.json({ success: true });
 });
 
@@ -1468,7 +1525,7 @@ app.post('/api/notify-exchange', async (req, res) => {
                 { text: "❌ Reject", callback_data: `act_${requestId}_Rejected` }
             ]]
         };                 
-        await sendMessageToTelegram(ADMIN_ID, adminMsg, keyboard, imageUrl);
+        await notifyAdmins(adminMsg, keyboard, imageUrl);
 
         // ---- Public Notification Channel/Group (set from Admin Panel Settings) ----
         // UPDATE: Telegram added a real `style` field for buttons in Bot API 9.4 (Feb 2026) —
